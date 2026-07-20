@@ -92,6 +92,7 @@ int main(void)
   MX_SPI3_Init();
   MX_UART5_Init();
   MX_USART3_UART_Init();
+  MX_UART4_Init();
   /* USER CODE BEGIN 2 */
   rot_test_init();   // 이게 빠져있었음
   /* USER CODE END 2 */

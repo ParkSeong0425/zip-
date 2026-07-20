@@ -66,6 +66,8 @@ void Error_Handler(void);
 #define W610_INT_EXTI_IRQn EXTI15_10_IRQn
 #define rs4852_Pin GPIO_PIN_13
 #define rs4852_GPIO_Port GPIOD
+#define rs485_Pin GPIO_PIN_12
+#define rs485_GPIO_Port GPIOC
 #define W610_RST_Pin GPIO_PIN_0
 #define W610_RST_GPIO_Port GPIOE
 
