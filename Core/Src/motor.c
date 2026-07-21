@@ -445,8 +445,8 @@ int motor_speed_mode(Motor *m)
         !set16(m, R_MODE, 0) ||
         !set16(m, R_SPEED_A, 0) ||
         !set16(m, R_SPEED_SEL, 0) ||
-        !set16(m, R_SPEED_ACC, 200) ||
-        !set16(m, R_SPEED_DEC, 200) ||
+        !set16(m, R_SPEED_ACC,200 ) ||  // 200ms 동안 가속
+        !set16(m, R_SPEED_DEC, 20) ||   // 20ms 동안 감속(0으로 하면 충격 있을 수 있음)
         !set16(m, R_DI2L, 1)) {
         *mode = -1;
         return 0;
@@ -482,16 +482,22 @@ int motor_speed(Motor *m, int rpm)
     if (!motor_speed_mode(m)) return 0;
     return set16(m, R_SPEED_CMD, (uint16_t)(int16_t)rpm);
 }
-
+/*
+ * DI1 원점 센서 확인
+ *
+ * 반환:
+ *  1 = DI1 ON
+ *  0 = DI1 OFF
+ * -1 = 통신 실패
+ */
 int motor_home_on(Motor *m)
 {
     int di;
 
-    /*
-     * H0B_03 is UInt32 in the AIMotor manual.
-     * Bit0 is the physical DI1 home sensor state.
-     */
-    if (!read32(m, R_DI, &di)) return -1;
+    if (!read32(m, R_DI, &di)) {
+        return -1;
+    }
+
     return (di & 1) ? 1 : 0;
 }
 
