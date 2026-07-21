@@ -7,9 +7,11 @@ extern UART_HandleTypeDef huart3;
 extern UART_HandleTypeDef huart4;
 extern UART_HandleTypeDef huart5;
 
-/* X = UART4, Y = UART5, both AIMotor address 1 */
+/* X = UART4, Y = UART5, 둘 다 AIMotor 주소 1 */
 Motor motorX = { &huart4, rs485_GPIO_Port,  rs485_Pin,  0 };
 Motor motorY = { &huart5, rs4852_GPIO_Port, rs4852_Pin, 0 };
+
+/* ===== 레지스터 주소 ===== */
 
 #define ID              1U
 
@@ -45,11 +47,13 @@ Motor motorY = { &huart5, rs4852_GPIO_Port, rs4852_Pin, 0 };
 #define R_ADDR          0x0C00
 #define R_FAULT_RST     0x0D01
 
-#define ACC_MS          1000   /* position move acceleration/deceleration */
-#define WAIT_MS         500    /* wait after one position segment */
-#define GAP             100    /* arrival tolerance used by motor_wait */
+#define ACC_MS          1000   /* 위치이동 가감속 시간 */
+#define WAIT_MS         500    /* 한 구간 이동 후 대기 */
+#define GAP             100    /* motor_wait 도착 허용오차 */
 
-static int x_mode = -1;
+/* ===== 전역 상태 ===== */
+
+static int x_mode = -1;   /* -1=미설정 0=속도 1=위치 */
 static int y_mode = -1;
 
 void print(const char *s)
@@ -67,47 +71,38 @@ static int *mode_ptr(Motor *m)
     return (m == &motorX) ? &x_mode : &y_mode;
 }
 
-static uint16_t crc16(
-        const uint8_t *data,
-        uint16_t len)
+/* ===== RS485 하위 통신 ===== */
+
+static uint16_t crc16(const uint8_t *data, uint16_t len)
 {
     uint16_t crc = 0xFFFF;
 
     for (uint16_t i = 0; i < len; i++) {
         crc ^= data[i];
-
         for (uint8_t j = 0; j < 8; j++) {
-            if (crc & 1U) {
-                crc = (crc >> 1) ^ 0xA001U;
-            }
-            else {
-                crc >>= 1;
-            }
+            if (crc & 1U) crc = (crc >> 1) ^ 0xA001U;
+            else          crc >>= 1;
         }
     }
-
     return crc;
 }
 
+/* 송신 방향으로 전환 */
 static void bus_tx(Motor *m)
 {
     HAL_GPIO_WritePin(m->port, m->pin, GPIO_PIN_SET);
     HAL_Delay(1);
 }
 
+/* 송신 완료를 기다린 뒤 수신 방향으로 전환 */
 static void bus_rx(Motor *m)
 {
-    while (__HAL_UART_GET_FLAG(
-            m->uart,
-            UART_FLAG_TC) == RESET) {
-    }
-
-    for (volatile uint32_t i = 0; i < 100; i++) {
-    }
-
+    while (__HAL_UART_GET_FLAG(m->uart, UART_FLAG_TC) == RESET) { }
+    for (volatile uint32_t i = 0; i < 100; i++) { }
     HAL_GPIO_WritePin(m->port, m->pin, GPIO_PIN_RESET);
 }
 
+/* 에러 플래그와 남은 수신 데이터를 비운다 */
 static void bus_clear(Motor *m)
 {
     __HAL_UART_CLEAR_OREFLAG(m->uart);
@@ -115,102 +110,64 @@ static void bus_clear(Motor *m)
     __HAL_UART_CLEAR_NEFLAG(m->uart);
     __HAL_UART_CLEAR_PEFLAG(m->uart);
 
-    while (__HAL_UART_GET_FLAG(
-            m->uart,
-            UART_FLAG_RXNE) != RESET) {
-
+    while (__HAL_UART_GET_FLAG(m->uart, UART_FLAG_RXNE) != RESET) {
         volatile uint8_t d = m->uart->Instance->DR;
         (void)d;
     }
 }
 
-static HAL_StatusTypeDef bus_xfer(
-        Motor *m,
-        uint8_t *tx,
-        uint16_t tn,
-        uint8_t *rx,
-        uint16_t rn)
+static HAL_StatusTypeDef bus_xfer(Motor *m, uint8_t *tx, uint16_t tn,
+                                  uint8_t *rx, uint16_t rn)
 {
     HAL_StatusTypeDef r;
 
     bus_clear(m);
     bus_tx(m);
-
-    r = HAL_UART_Transmit(
-            m->uart,
-            tx,
-            tn,
-            100);
-
+    r = HAL_UART_Transmit(m->uart, tx, tn, 100);
     bus_rx(m);
 
-    if (r == HAL_OK) {
-        r = HAL_UART_Receive(
-                m->uart,
-                rx,
-                rn,
-                500);
-    }
+    if (r == HAL_OK) r = HAL_UART_Receive(m->uart, rx, rn, 500);
 
     HAL_Delay(20);
     return r;
 }
 
-static int write16(
-        Motor *m,
-        uint16_t reg,
-        uint16_t val)
+/* ===== Modbus 읽기/쓰기 ===== */
+
+/* 0x06 단일 레지스터 쓰기 */
+static int write16(Motor *m, uint16_t reg, uint16_t val)
 {
-    uint8_t tx[8];
-    uint8_t rx[8];
-    uint16_t crc;
-    uint16_t rx_crc;
+    uint8_t tx[8], rx[8];
+    uint16_t crc, rx_crc;
     HAL_StatusTypeDef st;
     char b[120];
 
-    tx[0] = ID;
-    tx[1] = 0x06;
-    tx[2] = reg >> 8;
-    tx[3] = reg;
-    tx[4] = val >> 8;
-    tx[5] = val;
+    tx[0] = ID;      tx[1] = 0x06;
+    tx[2] = reg >> 8; tx[3] = reg;
+    tx[4] = val >> 8; tx[5] = val;
 
     crc = crc16(tx, 6);
-    tx[6] = crc;
-    tx[7] = crc >> 8;
+    tx[6] = crc; tx[7] = crc >> 8;
 
     st = bus_xfer(m, tx, 8, rx, 8);
 
     if (st != HAL_OK) {
-        snprintf(
-                b,
-                sizeof(b),
-                "%c WR TIMEOUT reg=%04X val=%04X st=%d\r\n",
-                name(m),
-                reg,
-                val,
-                (int)st);
+        snprintf(b, sizeof(b), "%c WR TIMEOUT reg=%04X val=%04X st=%d\r\n",
+                 name(m), reg, val, (int)st);
         print(b);
         return 0;
     }
 
     rx_crc = (uint16_t)rx[6] | ((uint16_t)rx[7] << 8);
 
-    if (rx[0] != ID ||
-        rx[1] != 0x06 ||
-        rx[2] != tx[2] ||
-        rx[3] != tx[3] ||
-        rx[4] != tx[4] ||
-        rx[5] != tx[5] ||
+    /* 응답은 요청과 완전히 같아야 한다 */
+    if (rx[0] != ID || rx[1] != 0x06 ||
+        rx[2] != tx[2] || rx[3] != tx[3] ||
+        rx[4] != tx[4] || rx[5] != tx[5] ||
         rx_crc != crc16(rx, 6)) {
 
-        snprintf(
-                b,
-                sizeof(b),
-                "%c WR BAD %02X %02X %02X %02X %02X %02X %02X %02X\r\n",
-                name(m),
-                rx[0], rx[1], rx[2], rx[3],
-                rx[4], rx[5], rx[6], rx[7]);
+        snprintf(b, sizeof(b), "%c WR BAD %02X %02X %02X %02X %02X %02X %02X %02X\r\n",
+                 name(m), rx[0], rx[1], rx[2], rx[3], rx[4], rx[5], rx[6], rx[7]);
         print(b);
         return 0;
     }
@@ -218,154 +175,94 @@ static int write16(
     return 1;
 }
 
-static int set16(
-        Motor *m,
-        uint16_t reg,
-        uint16_t val)
+/* 쓰기 3회 재시도 */
+static int set16(Motor *m, uint16_t reg, uint16_t val)
 {
     for (int i = 0; i < 3; i++) {
-        if (write16(m, reg, val)) {
-            HAL_Delay(30);
-            return 1;
-        }
-
+        if (write16(m, reg, val)) { HAL_Delay(30); return 1; }
         HAL_Delay(50);
     }
-
     return 0;
 }
 
-static uint16_t read16(
-        Motor *m,
-        uint16_t reg)
+/* 0x03 단일 레지스터 읽기, 실패시 0xFFFF */
+static uint16_t read16(Motor *m, uint16_t reg)
 {
-    uint8_t tx[8];
-    uint8_t rx[7];
-    uint16_t crc;
-    uint16_t rx_crc;
+    uint8_t tx[8], rx[7];
+    uint16_t crc, rx_crc;
 
-    tx[0] = ID;
-    tx[1] = 0x03;
-    tx[2] = reg >> 8;
-    tx[3] = reg;
-    tx[4] = 0;
-    tx[5] = 1;
+    tx[0] = ID;       tx[1] = 0x03;
+    tx[2] = reg >> 8; tx[3] = reg;
+    tx[4] = 0;        tx[5] = 1;
 
     crc = crc16(tx, 6);
-    tx[6] = crc;
-    tx[7] = crc >> 8;
+    tx[6] = crc; tx[7] = crc >> 8;
 
-    if (bus_xfer(m, tx, 8, rx, 7) != HAL_OK) {
-        return 0xFFFF;
-    }
+    if (bus_xfer(m, tx, 8, rx, 7) != HAL_OK) return 0xFFFF;
 
     rx_crc = (uint16_t)rx[5] | ((uint16_t)rx[6] << 8);
 
-    if (rx[0] != ID ||
-        rx[1] != 0x03 ||
-        rx[2] != 2 ||
-        rx_crc != crc16(rx, 5)) {
-        return 0xFFFF;
-    }
+    if (rx[0] != ID || rx[1] != 0x03 || rx[2] != 2 ||
+        rx_crc != crc16(rx, 5)) return 0xFFFF;
 
     return ((uint16_t)rx[3] << 8) | rx[4];
 }
 
-static int read16_ok(
-        Motor *m,
-        uint16_t reg,
-        uint16_t *out)
+static int read16_ok(Motor *m, uint16_t reg, uint16_t *out)
 {
     uint16_t v = read16(m, reg);
 
-    if (v == 0xFFFF) {
-        return 0;
-    }
-
+    if (v == 0xFFFF) return 0;
     *out = v;
     return 1;
 }
 
-static int write32(
-        Motor *m,
-        uint16_t reg,
-        int val)
+/* 0x10 2레지스터(32bit) 쓰기 */
+static int write32(Motor *m, uint16_t reg, int val)
 {
-    uint8_t tx[13];
-    uint8_t rx[8];
+    uint8_t tx[13], rx[8];
     uint32_t raw = (uint32_t)val;
-    uint16_t lo = raw;
-    uint16_t hi = raw >> 16;
-    uint16_t crc;
-    uint16_t rx_crc;
+    uint16_t lo = raw, hi = raw >> 16;
+    uint16_t crc, rx_crc;
 
-    tx[0] = ID;
-    tx[1] = 0x10;
-    tx[2] = reg >> 8;
-    tx[3] = reg;
-    tx[4] = 0;
-    tx[5] = 2;
-    tx[6] = 4;
-    tx[7] = lo >> 8;
-    tx[8] = lo;
-    tx[9] = hi >> 8;
-    tx[10] = hi;
+    tx[0] = ID;       tx[1] = 0x10;
+    tx[2] = reg >> 8; tx[3] = reg;
+    tx[4] = 0;        tx[5] = 2;   tx[6] = 4;
+    tx[7] = lo >> 8;  tx[8] = lo;
+    tx[9] = hi >> 8;  tx[10] = hi;
 
     crc = crc16(tx, 11);
-    tx[11] = crc;
-    tx[12] = crc >> 8;
+    tx[11] = crc; tx[12] = crc >> 8;
 
-    if (bus_xfer(m, tx, 13, rx, 8) != HAL_OK) {
-        return 0;
-    }
+    if (bus_xfer(m, tx, 13, rx, 8) != HAL_OK) return 0;
 
     rx_crc = (uint16_t)rx[6] | ((uint16_t)rx[7] << 8);
 
-    return
-            rx[0] == ID &&
-            rx[1] == 0x10 &&
-            rx[2] == tx[2] &&
-            rx[3] == tx[3] &&
-            rx[4] == 0 &&
-            rx[5] == 2 &&
-            rx_crc == crc16(rx, 6);
+    return rx[0] == ID && rx[1] == 0x10 &&
+           rx[2] == tx[2] && rx[3] == tx[3] &&
+           rx[4] == 0 && rx[5] == 2 &&
+           rx_crc == crc16(rx, 6);
 }
 
-static int read32(
-        Motor *m,
-        uint16_t reg,
-        int *out)
+/* 0x03 2레지스터(32bit) 읽기 */
+static int read32(Motor *m, uint16_t reg, int *out)
 {
-    uint8_t tx[8];
-    uint8_t rx[9];
-    uint16_t crc;
-    uint16_t rx_crc;
-    uint16_t lo;
-    uint16_t hi;
+    uint8_t tx[8], rx[9];
+    uint16_t crc, rx_crc, lo, hi;
 
-    tx[0] = ID;
-    tx[1] = 0x03;
-    tx[2] = reg >> 8;
-    tx[3] = reg;
-    tx[4] = 0;
-    tx[5] = 2;
+    tx[0] = ID;       tx[1] = 0x03;
+    tx[2] = reg >> 8; tx[3] = reg;
+    tx[4] = 0;        tx[5] = 2;
 
     crc = crc16(tx, 6);
-    tx[6] = crc;
-    tx[7] = crc >> 8;
+    tx[6] = crc; tx[7] = crc >> 8;
 
-    if (bus_xfer(m, tx, 8, rx, 9) != HAL_OK) {
-        return 0;
-    }
+    if (bus_xfer(m, tx, 8, rx, 9) != HAL_OK) return 0;
 
     rx_crc = (uint16_t)rx[7] | ((uint16_t)rx[8] << 8);
 
-    if (rx[0] != ID ||
-        rx[1] != 0x03 ||
-        rx[2] != 4 ||
-        rx_crc != crc16(rx, 7)) {
-        return 0;
-    }
+    if (rx[0] != ID || rx[1] != 0x03 || rx[2] != 4 ||
+        rx_crc != crc16(rx, 7)) return 0;
 
     lo = ((uint16_t)rx[3] << 8) | rx[4];
     hi = ((uint16_t)rx[5] << 8) | rx[6];
@@ -374,18 +271,20 @@ static int read32(
     return 1;
 }
 
+/* ===== 초기 설정 ===== */
+
+/* DI 기능 배정과 회전방향 설정. H03_03은 건드리지 않는다 */
 static int cfg(Motor *m, int dir)
 {
-    /* H03_03 is intentionally never written. */
     if (!set16(m, R_DI2L, 0)) return 0;
     if (!set16(m, R_DI4L, 0)) return 0;
     if (!set16(m, R_DI5L, 0)) return 0;
 
-    if (!set16(m, R_DI1, 0)) return 0;   /* sensor is read from H0B_03 */
-    if (!set16(m, R_DI2, 1)) return 0;   /* servo enable */
-    if (!set16(m, R_DI3, 0)) return 0;
-    if (!set16(m, R_DI4, 28)) return 0;  /* position start */
-    if (!set16(m, R_DI5, 34)) return 0;  /* emergency stop */
+    if (!set16(m, R_DI1, 0))  return 0;   /* 센서는 H0B_03으로 읽는다 */
+    if (!set16(m, R_DI2, 1))  return 0;   /* 서보 ON */
+    if (!set16(m, R_DI3, 0))  return 0;
+    if (!set16(m, R_DI4, 28)) return 0;   /* 위치 시작 */
+    if (!set16(m, R_DI5, 34)) return 0;   /* 비상 정지 */
     if (!set16(m, R_DIR, dir)) return 0;
 
     set16(m, R_FAULT_RST, 1);
@@ -398,18 +297,15 @@ int motor_write(Motor *m, uint16_t reg, uint16_t val)
     return write16(m, reg, val);
 }
 
+/* H0C_00 축 주소를 읽어 통신 확인 */
 int motor_check(Motor *m)
 {
     uint16_t v;
 
-    /* H0C_00 axis address is UInt16. */
     for (int i = 0; i < 2; i++) {
-        if (read16_ok(m, R_ADDR, &v) && v == ID) {
-            return 1;
-        }
+        if (read16_ok(m, R_ADDR, &v) && v == ID) return 1;
         HAL_Delay(30);
     }
-
     return 0;
 }
 
@@ -418,14 +314,10 @@ int motor_pos_mode(Motor *m)
     int *mode = mode_ptr(m);
     if (*mode == 1) return 1;
 
-    if (!set16(m, R_SPEED_CMD, 0) ||
-        !set16(m, R_DI2L, 0) ||
-        !set16(m, R_MODE, 1) ||
-        !set16(m, R_SRC, 2) ||
-        !set16(m, R_RUN, 0) ||
-        !set16(m, R_REG, 1) ||
-        !set16(m, R_BEGIN, 0) ||
-        !set16(m, R_DI4L, 0) ||
+    if (!set16(m, R_SPEED_CMD, 0) || !set16(m, R_DI2L, 0) ||
+        !set16(m, R_MODE, 1)      || !set16(m, R_SRC, 2)  ||
+        !set16(m, R_RUN, 0)       || !set16(m, R_REG, 1)  ||
+        !set16(m, R_BEGIN, 0)     || !set16(m, R_DI4L, 0) ||
         !set16(m, R_DI2L, 1)) {
         *mode = -1;
         return 0;
@@ -440,13 +332,11 @@ int motor_speed_mode(Motor *m)
     int *mode = mode_ptr(m);
     if (*mode == 0) return 1;
 
-    if (!set16(m, R_SPEED_CMD, 0) ||
-        !set16(m, R_DI2L, 0) ||
-        !set16(m, R_MODE, 0) ||
-        !set16(m, R_SPEED_A, 0) ||
+    if (!set16(m, R_SPEED_CMD, 0) || !set16(m, R_DI2L, 0)    ||
+        !set16(m, R_MODE, 0)      || !set16(m, R_SPEED_A, 0) ||
         !set16(m, R_SPEED_SEL, 0) ||
-        !set16(m, R_SPEED_ACC,200 ) ||  // 200ms 동안 가속
-        !set16(m, R_SPEED_DEC, 20) ||   // 20ms 동안 감속(0으로 하면 충격 있을 수 있음)
+        !set16(m, R_SPEED_ACC, 200) ||  /* 200ms 가속 */
+        !set16(m, R_SPEED_DEC, 20)  ||  /* 20ms 감속, 0이면 충격 */
         !set16(m, R_DI2L, 1)) {
         *mode = -1;
         return 0;
@@ -458,17 +348,17 @@ int motor_speed_mode(Motor *m)
 
 int motor_init(Motor *m, int dir)
 {
+    char b[48];
+
     *mode_ptr(m) = -1;
 
     if (!motor_check(m)) {
-        char b[48];
         snprintf(b, sizeof(b), "%c COMM FAIL\r\n", name(m));
         print(b);
         return 0;
     }
 
     if (!cfg(m, dir) || !motor_pos_mode(m)) {
-        char b[48];
         snprintf(b, sizeof(b), "%c INIT CFG FAIL\r\n", name(m));
         print(b);
         return 0;
@@ -476,39 +366,35 @@ int motor_init(Motor *m, int dir)
     return 1;
 }
 
+/* ===== 동작 ===== */
+
 int motor_speed(Motor *m, int rpm)
 {
     if (rpm < -6000 || rpm > 6000) return 0;
     if (!motor_speed_mode(m)) return 0;
     return set16(m, R_SPEED_CMD, (uint16_t)(int16_t)rpm);
 }
-/*
- * DI1 원점 센서 확인
- *
- * 반환:
- *  1 = DI1 ON
- *  0 = DI1 OFF
- * -1 = 통신 실패
- */
+
+/* DI1 원점 센서: 1=ON, 0=OFF, -1=통신 실패 */
 int motor_home_on(Motor *m)
 {
     int di;
 
-    if (!read32(m, R_DI, &di)) {
-        return -1;
-    }
-
+    if (!read32(m, R_DI, &di)) return -1;
     return (di & 1) ? 1 : 0;
 }
 
+/* 현재 위치를 소프트웨어 0으로 설정 */
 int motor_zero(Motor *m)
 {
     int raw;
+
     if (!read32(m, R_REALPOS, &raw) && !read32(m, R_REALPOS, &raw)) return 0;
     m->off = -raw;
     return 1;
 }
 
+/* 현재 위치를 last 값으로 맞춘다 */
 void motor_sync(Motor *m, int last)
 {
     int raw;
@@ -518,33 +404,31 @@ void motor_sync(Motor *m, int last)
 int motor_pos(Motor *m, int *out)
 {
     int raw;
+
     if (!read32(m, R_REALPOS, &raw)) return 0;
     *out = raw + m->off;
     return 1;
 }
 
+/*
+ * target은 원점 센서를 0으로 하는 소프트웨어 좌표다.
+ * 모터는 H0B_07 raw 좌표로 움직이므로 off를 빼서 변환한다.
+ * H11_04=1은 절대 이동이라 현재 위치와 무관하게 동작한다.
+ */
 int motor_move(Motor *m, int rpm, int target)
 {
     int raw_target;
 
-    /*
-     * target is a software coordinate whose home sensor is 0.
-     * The motor itself moves with the raw H0B_07 coordinate, so convert
-     * software target -> motor raw target by removing the software offset.
-     *
-     * H11_04 = 1 means absolute displacement. This avoids accumulating
-     * relative-move errors and works from any current X/Y position.
-     */
     if (!motor_pos_mode(m)) return 0;
 
     raw_target = target - m->off;
 
-    if (!set16(m, R_DI4L, 0)) return 0;
-    if (!set16(m, R_TYPE, 1)) return 0;
+    if (!set16(m, R_DI4L, 0))          return 0;
+    if (!set16(m, R_TYPE, 1))          return 0;
     if (!write32(m, R_POS, raw_target)) return 0;
-    if (!set16(m, R_SPEED, rpm)) return 0;
-    if (!set16(m, R_ACC, ACC_MS)) return 0;
-    if (!set16(m, R_WAIT, WAIT_MS)) return 0;
+    if (!set16(m, R_SPEED, rpm))       return 0;
+    if (!set16(m, R_ACC, ACC_MS))      return 0;
+    if (!set16(m, R_WAIT, WAIT_MS))    return 0;
 
     return set16(m, R_DI4L, 1);
 }
@@ -555,16 +439,10 @@ int motor_stop(Motor *m)
     return set16(m, R_DI4L, 0);
 }
 
-int motor_begin(Motor *m, int v)
-{
-    return set16(m, R_BEGIN, v);
-}
+int motor_begin(Motor *m, int v) { return set16(m, R_BEGIN, v); }
+int motor_di5(Motor *m, int v)   { return set16(m, R_DI5L, v); }
 
-int motor_di5(Motor *m, int v)
-{
-    return set16(m, R_DI5L, v);
-}
-
+/* X와 Y가 모두 목표에 도착할 때까지 대기 */
 int motor_wait(Motor *mx, int xt, Motor *my, int yt, int timeout)
 {
     uint32_t t0 = HAL_GetTick();

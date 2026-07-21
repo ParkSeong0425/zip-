@@ -3,37 +3,38 @@
 #include "rot_test.h"
 #include "fram.h"
 #include "tcp.h"
+#include "item.h"
 #include <stddef.h>
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 
-/* ===================== 설정값 ===================== */
+/* ===== 설정값 ===== */
 
 #define ROT_RPM         2500
 #define X_RPM           1000
 #define Y_RPM           1000
-#define HOME_RPM        100
+#define HOME_RPM        20      /* 원점 탐색 속도. 100이면 초당 267mm로 너무 빠름 */
 
 #define TIMEOUT         60000U
 #define HOME_TIMEOUT    65000U
 
-#define ROT_GAP         300
-#define XY_GAP          1000
-#define XY_STABLE       2
+#define ROT_GAP         300     /* ROT 도착 허용오차 */
+#define XY_GAP          1000    /* XY 도착 허용오차 */
+#define XY_STABLE       2       /* 연속 몇 번 들어와야 도착 */
+#define HOLD_MS         500U    /* 한 단계 도착 후 대기 시간 */
 
 #define MAX_X           8
 #define MAX_Y           8
 
 #define DATA_ADDR       0x0000
-#define DATA_VER        0x0007
+#define DATA_VER        0x0008  /* in 위치가 추가돼 구조가 바뀜 */
 
 #define ROT_ADDR        0x0200
 #define ROT_MAGIC       0x54494C54UL
 #define ROT_VER         5
-
-#define ROT_600         0x6AAA
+#define ROT_600         0x6AAA  /* C에서 R/L까지 거리 */
 
 #define REV_MM          160
 #define REV_CNT         131072
@@ -41,199 +42,114 @@
 
 #define AXIS_X          1
 #define AXIS_Y          2
+#define AXIS_IN         3       /* 입력칸. X와 Y를 같이 움직인다 */
 
-/* ===================== 자동 운전 상태 ===================== */
-
-/*
- * 자동운전:
- * R 또는 L 이동
- * -> C 이동
- * -> X/Y 이동
- * -> 다음 좌표
- */
+/* 한 사이클: C -> 입력칸 -> R -> C -> 목표칸 -> L -> C */
 typedef enum {
     S_IDLE,
-    S_SIDE_START,
-    S_SIDE_WAIT,
-    S_C_START,
-    S_C_WAIT,
-    S_XY_START,
-    S_XY_WAIT
+    S_C1_START, S_C1_WAIT,      /* 1. ROT -> C */
+    S_IN_START, S_IN_WAIT,      /* 2. X/Y -> 입력칸 */
+    S_R_START,  S_R_WAIT,       /* 3. ROT -> R */
+    S_C2_START, S_C2_WAIT,      /* 4. ROT -> C */
+    S_XY_START, S_XY_WAIT,      /* 5. X/Y -> 목표칸 */
+    S_L_START,  S_L_WAIT,       /* 6. ROT -> L */
+    S_C3_START, S_C3_WAIT       /* 7. ROT -> C */
 } Seq;
 
-/* ===================== FRAM 데이터 ===================== */
+/* ===== FRAM 데이터 ===== */
 
 typedef struct {
     int ver;
-
-    /* 실제 사용할 X 열 수와 Y 단 수 */
-    int x_n;
-    int y_n;
-
-    /* 최대 MAX_X, MAX_Y까지 위치 저장 */
-    int x[MAX_X];
-    int y[MAX_Y];
-
-    int home_x;
-    int home_y;
-    int last_x;
-    int last_y;
+    int x_n, y_n;               /* 실제 사용할 열 수, 단 수 */
+    int x[MAX_X], y[MAX_Y];     /* 각 열/단 위치 */
+    int home_x, home_y;
+    int last_x, last_y;
     int home_ok;
-
-    /*
-     * ref:
-     * 첫 번째 기준 위치가 저장됐는지 표시
-     *
-     * ready:
-     * 전체 위치 계산이 끝났는지 표시
-     */
-    int x_ref;
-    int y_ref;
-    int x_ready;
-    int y_ready;
+    int in_x, in_y;             /* 입력칸 위치 */
+    int in_ready;               /* 입력칸 저장 완료 */
+    int x_ref, y_ref;           /* 첫 기준 위치 저장됨 */
+    int x_ready, y_ready;       /* 전체 위치 계산 완료 */
 } Data;
 
-/*
- * ROT C 위치 데이터 형식을 유지한다.
- * 현재는 부팅 위치를 C=0으로 설정한다.
- */
+/* ROT C 위치. 현재는 부팅 위치를 C=0으로 쓴다 */
 typedef struct {
     uint32_t magic;
-    int32_t c_offset;
+    int32_t  c_offset;
     uint16_t version;
     uint16_t sum;
 } Tilt;
 
-/* ===================== 전역 상태 ===================== */
+/* ===== 전역 상태 ===== */
 
 static Data data;
 static Tilt tilt;
-
 static int tilt_ok;
 
-static int c_pos;
-static int r_pos;
-static int l_pos;
+static int c_pos, r_pos, l_pos;         /* ROT의 C, R, L 위치 */
+static int rot_homed, x_homed, y_homed;
 
-static int rot_homed;
-static int x_homed;
-static int y_homed;
-
-static int save_axis;
-static int save_n;
+static int save_axis;                   /* 저장 대기중인 축, 0=없음 */
+static int save_n;                      /* 저장 대기중인 번호 */
 
 static Seq seq;
-
-static int run_on;
 static int run_col = 1;
 static int run_dan = 1;
 
-/* 1=R, -1=L */
-static int side = 1;
+static int seq_result;                  /* 0=진행중 1=성공 -1=실패 */
+static uint32_t move_t0, poll_t0;
+static uint32_t hold_t0;                /* 단계 사이 대기 시작 시각 */
+static int x_now, y_now;
+static int x_count, y_count;
 
-static volatile uint8_t stop_req;
+/* ===== 공통 ===== */
 
-static uint32_t move_t0;
-static uint32_t poll_t0;
+static int gap(int a, int b) { return abs(a - b); }
 
-static int x_now;
-static int y_now;
-static int x_count;
-static int y_count;
+/* UART3와 TCP로 동시에 보낸다 */
+static void reply(const char *s) { tcp_reply(s); }
 
-/* ===================== 공통 함수 ===================== */
+/* item.c가 grid 크기를 알아야 해서 열어준다 */
+int save_result(void) { return seq_result; }
 
-static int gap(int a, int b)
-{
-    return abs(a - b);
-}
+int save_grid_x(void) { return data.x_n; }
+int save_grid_y(void) { return data.y_n; }
 
-/*
- * UART3 출력과 TCP 응답을 동시에 보낸다.
- */
-static void reply(const char *s)
-{
-    tcp_reply(s);
-}
-
-/*
- * 설정된 grid가 정상인지 검사한다.
- */
 static int grid_ok(void)
 {
-    return
-        data.x_n >= 2 &&
-        data.x_n <= MAX_X &&
-        data.y_n >= 2 &&
-        data.y_n <= MAX_Y;
+    return data.x_n >= 2 && data.x_n <= MAX_X &&
+           data.y_n >= 2 && data.y_n <= MAX_Y;
 }
 
-/* ===================== FRAM 함수 ===================== */
+/* ===== FRAM ===== */
 
 static uint16_t tilt_sum(const Tilt *p)
 {
     const uint8_t *b = (const uint8_t *)p;
     uint16_t sum = 0;
 
-    for (uint16_t i = 0;
-         i < offsetof(Tilt, sum);
-         i++) {
-
-        sum += b[i];
-    }
-
+    for (uint16_t i = 0; i < offsetof(Tilt, sum); i++) sum += b[i];
     return sum;
 }
 
-static void data_write(void)
+static void data_write(void) { fram_write(DATA_ADDR, &data, sizeof(data)); }
+
+static void data_clear(void)
 {
-    fram_write(
-        DATA_ADDR,
-        &data,
-        sizeof(data));
+    memset(&data, 0, sizeof(data));
+    data.ver = DATA_VER;
+    data_write();
 }
 
 static void data_read(void)
 {
-    fram_read(
-        DATA_ADDR,
-        &data,
-        sizeof(data));
+    fram_read(DATA_ADDR, &data, sizeof(data));
 
-    /*
-     * DATA_VER가 다르면 기존 구조와 맞지 않으므로 초기화한다.
-     * memset으로 x_n과 y_n도 0이 된다.
-     */
-    if (data.ver != DATA_VER) {
-        memset(
-            &data,
-            0,
-            sizeof(data));
+    /* 버전이 다르면 구조가 안 맞으므로 초기화 */
+    if (data.ver != DATA_VER) { data_clear(); return; }
 
-        data.ver = DATA_VER;
-
-        data_write();
-        return;
-    }
-
-    /*
-     * FRAM 값이 깨져 범위를 벗어난 경우
-     * grid와 위치값을 초기화한다.
-     */
-    if (data.x_n < 0 ||
-        data.x_n > MAX_X ||
-        data.y_n < 0 ||
-        data.y_n > MAX_Y) {
-
-        memset(
-            &data,
-            0,
-            sizeof(data));
-
-        data.ver = DATA_VER;
-
-        data_write();
-    }
+    /* 값이 깨져 범위를 벗어나면 초기화 */
+    if (data.x_n < 0 || data.x_n > MAX_X ||
+        data.y_n < 0 || data.y_n > MAX_Y) data_clear();
 }
 
 static void tilt_write(void)
@@ -241,14 +157,10 @@ static void tilt_write(void)
     tilt.magic = ROT_MAGIC;
     tilt.version = ROT_VER;
     tilt.sum = tilt_sum(&tilt);
-
-    fram_write(
-        ROT_ADDR,
-        &tilt,
-        sizeof(tilt));
+    fram_write(ROT_ADDR, &tilt, sizeof(tilt));
 }
 
-/* ===================== ROT 위치 ===================== */
+/* ===== ROT 위치 ===== */
 
 static void rot_set(void)
 {
@@ -257,1714 +169,782 @@ static void rot_set(void)
     l_pos = c_pos - ROT_600;
 }
 
-/*
- * 수동 c/r/l, HOME C, 저장 시작 전 C 이동에 사용한다.
- *
- * F1 상태가 1이면 모터가 정지한 상태다.
- * 정지 후 최종 위치가 ROT_GAP 안에 들어오면 완료한다.
- */
+/* F1 상태가 1이면 정지. 위치가 ROT_GAP 안이면 완료 */
 static int wait_rot(int target)
 {
     uint32_t t0 = HAL_GetTick();
     uint8_t state;
     int now;
 
-    while (HAL_GetTick() - t0 <
-           TIMEOUT) {
-
-        if (mks_state(&state) &&
-            state == 1U &&
-            mks_pos(&now) &&
-            gap(now, target) <= ROT_GAP) {
-
-            return 1;
-        }
-
+    while (HAL_GetTick() - t0 < TIMEOUT) {
+        if (mks_state(&state) && state == 1U &&
+            mks_pos(&now) && gap(now, target) <= ROT_GAP) return 1;
         HAL_Delay(50);
     }
-
     mks_stop();
-
     return 0;
 }
 
-static int move_rot(int target)
-{
-    return
-        mks_move_abs(
-            ROT_RPM,
-            target) &&
-        wait_rot(target);
-}
+static int move_rot(int t) { return mks_move_abs(ROT_RPM, t) && wait_rot(t); }
 
 /*
- * 전원을 켠 현재 ROT 위치를 C=0으로 설정한다.
- * 광센서를 찾으러 움직이지 않는다.
+ * X/Y와 같은 방식.
+ * 원점 센서를 찾아 이동하고, 멈춘 그 자리를 C=0으로 잡는다.
  */
-static int rot_init_c(void)
+static int rot_home_c(void)
 {
     rot_homed = 0;
 
-    /*
-     * 현재 MKS 위치를 움직이지 않고
-     * Axis 좌표 0으로 설정한다.
-     */
-    if (!mks_zero()) {
-        return 0;
-    }
+    if (!mks_home()) return 0;      /* 센서까지 이동 */
+    if (!mks_zero()) return 0;      /* 멈춘 자리를 0으로 */
 
     tilt.c_offset = 0;
-
     tilt_write();
-
     tilt_ok = 1;
 
-    /*
-     * C=0
-     * R=+ROT_600
-     * L=-ROT_600
-     */
-    rot_set();
-
+    rot_set();          /* C=0, R=+ROT_600, L=-ROT_600 */
     rot_homed = 1;
-
     return 1;
 }
 
-/* ===================== X/Y 홈 ===================== */
+/* ===== X/Y 홈 ===== */
 
 /*
- * X와 Y를 동시에 홈 방향으로 움직인다.
- *
- * X DI1=1:
- * X만 정지
- *
- * Y DI1=1:
- * Y만 정지
- *
- * 두 축 모두 센서를 인식하면
- * 각각의 정지 위치를 소프트웨어 원점 0으로 설정한다.
+ * X와 Y를 동시에 홈 방향으로 보낸다.
+ * DI1이 켜진 축부터 개별 정지하고, 둘 다 끝나면 각각 0으로 잡는다.
  */
 static int home_xy(void)
 {
     uint32_t t0;
-
-    int xd = 0;
-    int yd = 0;
-
-    int xs;
-    int ys;
+    int xd = 0, yd = 0, xs, ys;
 
     print("HOME XY START\r\n");
 
-    /*
-     * X/Y를 속도제어 모드로 변경한다.
-     */
-    if (!motor_speed_mode(&motorX) ||
-        !motor_speed_mode(&motorY)) {
-
-        goto fail;
-    }
-
-    /*
-     * X 홈 방향: -100rpm
-     */
-    if (!motor_speed(
-            &motorX,
-            -HOME_RPM)) {
-
-        goto fail;
-    }
-
-    /*
-     * Y 홈 방향: +100rpm
-     */
-    if (!motor_speed(
-            &motorY,
-            HOME_RPM)) {
-
-        goto fail;
-    }
+    if (!motor_speed_mode(&motorX) || !motor_speed_mode(&motorY)) goto fail;
+    if (!motor_speed(&motorX, -HOME_RPM)) goto fail;    /* X 홈 방향 */
+    if (!motor_speed(&motorY,  HOME_RPM)) goto fail;    /* Y 홈 방향 */
 
     t0 = HAL_GetTick();
 
-    while (HAL_GetTick() - t0 <
-           HOME_TIMEOUT) {
-
-        /*
-         * X가 아직 센서를 찾지 못했을 때만 검사한다.
-         */
+    while (HAL_GetTick() - t0 < HOME_TIMEOUT) {
         if (!xd) {
-            xs = motor_home_on(
-                    &motorX);
-
-            if (xs < 0) {
-                goto fail;
-            }
-
-            /*
-             * X DI1=1이면 X만 정지한다.
-             */
-            if (xs == 1) {
-                motor_speed(
-                    &motorX,
-                    0);
-
-                xd = 1;
-
-                print(
-                    "HOME X SENSOR\r\n");
-            }
+            xs = motor_home_on(&motorX);
+            if (xs < 0) goto fail;
+            if (xs == 1) { motor_speed(&motorX, 0); xd = 1; print("HOME X SENSOR\r\n"); }
         }
-
-        /*
-         * Y가 아직 센서를 찾지 못했을 때만 검사한다.
-         */
         if (!yd) {
-            ys = motor_home_on(
-                    &motorY);
-
-            if (ys < 0) {
-                goto fail;
-            }
-
-            /*
-             * Y DI1=1이면 Y만 정지한다.
-             */
-            if (ys == 1) {
-                motor_speed(
-                    &motorY,
-                    0);
-
-                yd = 1;
-
-                print(
-                    "HOME Y SENSOR\r\n");
-            }
+            ys = motor_home_on(&motorY);
+            if (ys < 0) goto fail;
+            if (ys == 1) { motor_speed(&motorY, 0); yd = 1; print("HOME Y SENSOR\r\n"); }
         }
-
-        if (xd && yd) {
-            break;
-        }
-
+        if (xd && yd) break;
         HAL_Delay(10);
     }
 
-    if (!xd || !yd) {
-        goto fail;
-    }
+    if (!xd || !yd) goto fail;
+    HAL_Delay(50);      /* 감속이 끝날 시간 */
 
-    /*
-     * DEC 감속이 끝날 시간을 기다린다.
-     */
-    HAL_Delay(50);
-
-    /*
-     * 센서에서 정지한 위치를
-     * 각각의 소프트웨어 좌표 0으로 설정한다.
-     */
-    if (!motor_zero(&motorX) ||
-        !motor_zero(&motorY)) {
-
-        goto fail;
-    }
-
-    /*
-     * 홈 완료 후 위치제어 모드로 돌아간다.
-     */
-    if (!motor_pos_mode(&motorX) ||
-        !motor_pos_mode(&motorY)) {
-
-        goto fail;
-    }
+    /* 센서에서 멈춘 위치를 소프트웨어 0으로 */
+    if (!motor_zero(&motorX) || !motor_zero(&motorY)) goto fail;
+    if (!motor_pos_mode(&motorX) || !motor_pos_mode(&motorY)) goto fail;
 
     x_homed = 1;
     y_homed = 1;
-
-    data.home_x = 0;
-    data.home_y = 0;
-
-    data.last_x = 0;
-    data.last_y = 0;
-
+    data.home_x = data.home_y = 0;
+    data.last_x = data.last_y = 0;
     data.home_ok |= 0x03;
-
     data_write();
 
     print("HOME XY OK\r\n");
-
     return 1;
 
 fail:
-    motor_speed(
-        &motorX,
-        0);
-
-    motor_speed(
-        &motorY,
-        0);
-
-    motor_pos_mode(
-        &motorX);
-
-    motor_pos_mode(
-        &motorY);
-
+    motor_speed(&motorX, 0);
+    motor_speed(&motorY, 0);
+    motor_pos_mode(&motorX);
+    motor_pos_mode(&motorY);
     x_homed = 0;
     y_homed = 0;
-
     print("HOME XY FAIL\r\n");
-
     return 0;
 }
 
 int save_home(void)
 {
-    if (save_busy() ||
-        save_axis ||
-        !rot_homed ||
-        !tilt_ok) {
+    if (save_busy() || save_axis) return 0;
 
-        return 0;
-    }
-
-    /*
-     * X/Y 홈 전에 ROT를 C로 이동한다.
-     */
-    if (!move_rot(c_pos)) {
+    /* X/Y 홈 전에 ROT도 센서로 원점을 잡는다 */
+    if (!rot_home_c()) {
         HAL_Delay(300);
-
-        if (!move_rot(c_pos)) {
-            print(
-                "HOME C FAIL\r\n");
-
-            return 0;
-        }
+        if (!rot_home_c()) { print("HOME C FAIL\r\n"); return 0; }
     }
 
     print("HOME C OK\r\n");
-
     return home_xy();
 }
 
-/* ===================== grid 설정 ===================== */
+/* ===== grid 설정 ===== */
 
-/*
- * grid 크기가 변경된 축만 위치값을 초기화한다.
- *
- * 같은 grid를 다시 입력하면
- * 기존 위치값은 유지한다.
- */
+/* 크기가 바뀐 축만 위치값을 지운다. 같은 값이면 유지 */
 static void grid_set(int xn, int yn)
 {
     char msg[96];
 
-    if (xn < 2 ||
-        xn > MAX_X ||
-        yn < 2 ||
-        yn > MAX_Y) {
-
-        snprintf(
-            msg,
-            sizeof(msg),
-            "GRID ERROR X=2~%d Y=2~%d\r\n",
-            MAX_X,
-            MAX_Y);
-
+    if (xn < 2 || xn > MAX_X || yn < 2 || yn > MAX_Y) {
+        snprintf(msg, sizeof(msg), "GRID ERROR X=2~%d Y=2~%d\r\n", MAX_X, MAX_Y);
         reply(msg);
         return;
     }
 
-    /*
-     * X 열 수가 변경되면
-     * X 위치와 저장 상태만 초기화한다.
-     */
     if (data.x_n != xn) {
-        memset(
-            data.x,
-            0,
-            sizeof(data.x));
-
+        memset(data.x, 0, sizeof(data.x));
         data.x_n = xn;
-        data.last_x = 0;
-        data.x_ref = 0;
-        data.x_ready = 0;
+        data.last_x = data.x_ref = data.x_ready = 0;
     }
-
-    /*
-     * Y 단 수가 변경되면
-     * Y 위치와 저장 상태만 초기화한다.
-     */
     if (data.y_n != yn) {
-        memset(
-            data.y,
-            0,
-            sizeof(data.y));
-
+        memset(data.y, 0, sizeof(data.y));
         data.y_n = yn;
-        data.last_y = 0;
-        data.y_ref = 0;
-        data.y_ready = 0;
+        data.last_y = data.y_ref = data.y_ready = 0;
     }
 
-    run_col = 1;
-    run_dan = 1;
-
+    run_col = run_dan = 1;
     data_write();
 
-    snprintf(
-        msg,
-        sizeof(msg),
-        "GRID OK X=%d Y=%d\r\n",
-        data.x_n,
-        data.y_n);
-
+    snprintf(msg, sizeof(msg), "GRID OK X=%d Y=%d\r\n", data.x_n, data.y_n);
     reply(msg);
 }
 
-/* ===================== 위치 저장 ===================== */
+/* ===== 위치 저장 ===== */
 
 /*
- * X:
- * 마지막 열을 먼저 저장한다.
- * 그다음 마지막 전 열을 저장한다.
- *
- * grid 4 5:
- * x4 -> s
- * x3 -> s
- *
- * grid 6 5:
- * x6 -> s
- * x5 -> s
- *
- * Y:
- * y1 -> s
- * y2 -> s
+ * X는 마지막 열, 그다음 마지막 전 열 순서. grid 4 5면 x4 -> s, x3 -> s
+ * Y는 y1, y2 순서.
  */
 static int save_start(int axis, int n)
 {
     Motor *m;
     int rpm;
 
-    if (save_busy() ||
-        save_axis) {
+    if (save_busy() || save_axis || !grid_ok()) return 0;
 
-        return 0;
-    }
+    /* 입력칸은 X와 Y를 같이 움직인다 */
+    if (axis == AXIS_IN) {
+        if (!x_homed || !y_homed) return 0;
+        if (!move_rot(c_pos)) return 0;
+        if (!motor_speed_mode(&motorX) || !motor_speed_mode(&motorY)) return 0;
+        if (!motor_speed(&motorX,  HOME_RPM)) return 0;
+        if (!motor_speed(&motorY, -HOME_RPM)) return 0;
 
-    if (!grid_ok()) {
-        return 0;
-    }
-
-    switch (axis) {
-
-    case AXIS_X:
-        if (!x_homed) {
-            return 0;
-        }
-
-        /*
-         * X는 마지막 열과
-         * 마지막 전 열만 직접 저장한다.
-         */
-        if (n != data.x_n &&
-            n != data.x_n - 1) {
-
-            return 0;
-        }
-
-        /*
-         * 마지막 전 열을 저장하기 전에
-         * 마지막 열이 먼저 저장돼 있어야 한다.
-         */
-        if (n == data.x_n - 1 &&
-            !data.x_ref) {
-
-            return 0;
-        }
-
-        m = &motorX;
-
-        /*
-         * X 저장 방향은 홈 방향의 반대다.
-         */
-        rpm = HOME_RPM;
-
-        break;
-
-    case AXIS_Y:
-        if (!y_homed) {
-            return 0;
-        }
-
-        /*
-         * Y는 y1과 y2만 직접 저장한다.
-         */
-        if (n != 1 &&
-            n != 2) {
-
-            return 0;
-        }
-
-        /*
-         * y2 저장 전에 y1이 먼저 저장돼 있어야 한다.
-         */
-        if (n == 2 &&
-            !data.y_ref) {
-
-            return 0;
-        }
-
-        m = &motorY;
-
-        /*
-         * Y 저장 방향은 홈 방향의 반대다.
-         */
-        rpm = -HOME_RPM;
-
-        break;
-
-    default:
-        return 0;
-    }
-
-    /*
-     * 저장 이동 전에 ROT를 C로 이동한다.
-     */
-    if (!move_rot(c_pos)) {
-        return 0;
-    }
-
-    if (!motor_speed_mode(m) ||
-        !motor_speed(m, rpm)) {
-
-        return 0;
-    }
-
-    /*
-     * s 명령을 받을 때 사용할
-     * 축과 저장 번호를 기억한다.
-     */
-    save_axis = axis;
-    save_n = n;
-
-    return 1;
-}
-
-static int save_end(void)
-{
-    Motor *m;
-
-    int pos;
-    int step;
-
-    int axis = save_axis;
-    int n = save_n;
-
-    if (!axis) {
-        return 0;
-    }
-
-    m = (axis == AXIS_X) ?
-        &motorX :
-        &motorY;
-
-    /*
-     * 저장 이동을 정지한다.
-     */
-    if (!motor_speed(m, 0)) {
-        goto bad;
-    }
-
-    HAL_Delay(100);
-
-    /*
-     * 정지 위치를 읽는다.
-     */
-    if (!motor_pos(m, &pos) &&
-        !motor_pos(m, &pos)) {
-
-        goto bad;
+        save_axis = axis;
+        save_n = n;
+        return 1;
     }
 
     if (axis == AXIS_X) {
-        int last =
-            data.x_n - 1;
+        if (!x_homed) return 0;
+        /* 마지막 열과 마지막 전 열만 직접 저장 */
+        if (n != data.x_n && n != data.x_n - 1) return 0;
+        /* 마지막 전 열은 마지막 열이 저장된 뒤에만 */
+        if (n == data.x_n - 1 && !data.x_ref) return 0;
+        m = &motorX;
+        rpm = HOME_RPM;         /* 홈 방향의 반대 */
+    }
+    else if (axis == AXIS_Y) {
+        if (!y_homed) return 0;
+        if (n != 1 && n != 2) return 0;         /* y1, y2만 */
+        if (n == 2 && !data.y_ref) return 0;    /* y2는 y1 뒤에만 */
+        m = &motorY;
+        rpm = -HOME_RPM;        /* 홈 방향의 반대 */
+    }
+    else return 0;
 
-        /*
-         * 첫 번째 X 저장:
-         * 마지막 열 위치를 저장한다.
-         */
+    if (!move_rot(c_pos)) return 0;             /* 저장 이동 전에 C로 */
+    if (!motor_speed_mode(m) || !motor_speed(m, rpm)) return 0;
+
+    /* s 명령이 올 때 쓸 축과 번호를 기억 */
+    save_axis = axis;
+    save_n = n;
+    return 1;
+}
+
+/* 입력칸 저장: X와 Y를 같이 멈추고 두 위치를 함께 기록한다 */
+static int save_end_in(void)
+{
+    int px, py;
+
+    if (!motor_speed(&motorX, 0) || !motor_speed(&motorY, 0)) goto bad;
+    HAL_Delay(100);
+
+    if (!motor_pos(&motorX, &px) && !motor_pos(&motorX, &px)) goto bad;
+    if (!motor_pos(&motorY, &py) && !motor_pos(&motorY, &py)) goto bad;
+
+    data.in_x = px;
+    data.in_y = py;
+    data.in_ready = 1;
+
+    if (!motor_pos_mode(&motorX) || !motor_pos_mode(&motorY)) goto bad;
+
+    save_axis = save_n = 0;
+    data_write();
+    return 1;
+
+bad:
+    motor_speed(&motorX, 0);
+    motor_speed(&motorY, 0);
+    motor_pos_mode(&motorX);
+    motor_pos_mode(&motorY);
+    save_axis = save_n = 0;
+    return 0;
+}
+
+/* s 명령: 현재 위치를 저장하고 나머지 칸을 계산한다 */
+static int save_end(void)
+{
+    Motor *m;
+    int pos, step;
+    int axis = save_axis;
+    int n = save_n;
+
+    if (!axis) return 0;
+    if (axis == AXIS_IN) return save_end_in();
+
+    m = (axis == AXIS_X) ? &motorX : &motorY;
+
+    if (!motor_speed(m, 0)) goto bad;
+    HAL_Delay(100);
+    if (!motor_pos(m, &pos) && !motor_pos(m, &pos)) goto bad;
+
+    if (axis == AXIS_X) {
+        int last = data.x_n - 1;
+
+        /* 첫 저장: 마지막 열 */
         if (n == data.x_n) {
-            memset(
-                data.x,
-                0,
-                sizeof(data.x));
-
+            memset(data.x, 0, sizeof(data.x));
             data.x[last] = pos;
-
             data.x_ref = 1;
             data.x_ready = 0;
         }
-
-        /*
-         * 두 번째 X 저장:
-         * 마지막 전 열을 저장한 뒤
-         * X1까지 같은 간격으로 계산한다.
-         */
-        else if (n ==
-                 data.x_n - 1) {
-
-            if (!data.x_ref) {
-                goto bad;
-            }
-
-            step =
-                pos -
-                data.x[last];
-
-            if (!step) {
-                goto bad;
-            }
+        /* 두 번째 저장: 간격을 구해 X1까지 계산 */
+        else if (n == data.x_n - 1) {
+            if (!data.x_ref) goto bad;
+            step = pos - data.x[last];
+            if (!step) goto bad;
 
             data.x[last - 1] = pos;
-
-            /*
-             * 뒤에서 앞으로 계산한다.
-             *
-             * 예:
-             * X4=1000, X3=2000
-             * X2=3000, X1=4000
-             */
-            for (int i = last - 2;
-                 i >= 0;
-                 i--) {
-
-                data.x[i] =
-                    data.x[i + 1] +
-                    step;
-            }
-
+            /* 뒤에서 앞으로. 예: X4=1000 X3=2000 X2=3000 X1=4000 */
+            for (int i = last - 2; i >= 0; i--) data.x[i] = data.x[i + 1] + step;
             data.x_ready = 1;
         }
-        else {
-            goto bad;
-        }
+        else goto bad;
 
         data.last_x = pos;
     }
     else {
-        /*
-         * 첫 번째 Y 저장:
-         * Y1 위치를 저장한다.
-         */
+        /* 첫 저장: Y1 */
         if (n == 1) {
-            memset(
-                data.y,
-                0,
-                sizeof(data.y));
-
+            memset(data.y, 0, sizeof(data.y));
             data.y[0] = pos;
-
             data.y_ref = 1;
             data.y_ready = 0;
         }
-
-        /*
-         * 두 번째 Y 저장:
-         * Y2를 기준으로 마지막 단까지 계산한다.
-         */
+        /* 두 번째 저장: 간격을 구해 마지막 단까지 계산 */
         else if (n == 2) {
-            if (!data.y_ref) {
-                goto bad;
-            }
+            if (!data.y_ref) goto bad;
+            step = pos - data.y[0];
+            if (!step) goto bad;
 
-            step =
-                pos -
-                data.y[0];
-
-            if (!step) {
-                goto bad;
-            }
-
-            /*
-             * Y1부터 같은 간격으로
-             * 실제 사용하는 마지막 단까지 계산한다.
-             */
-            for (int i = 1;
-                 i < data.y_n;
-                 i++) {
-
-                data.y[i] =
-                    data.y[0] +
-                    step * i;
-            }
-
+            for (int i = 1; i < data.y_n; i++) data.y[i] = data.y[0] + step * i;
             data.y_ready = 1;
         }
-        else {
-            goto bad;
-        }
+        else goto bad;
 
         data.last_y = pos;
     }
 
-    /*
-     * 저장 완료 후 위치제어 모드로 복귀한다.
-     */
-    if (!motor_pos_mode(m)) {
-        goto bad;
-    }
+    if (!motor_pos_mode(m)) goto bad;   /* 저장 후 위치제어 복귀 */
 
-    save_axis = 0;
-    save_n = 0;
-
+    save_axis = save_n = 0;
     data_write();
-
     return 1;
 
 bad:
-    motor_speed(
-        m,
-        0);
-
+    motor_speed(m, 0);
     motor_pos_mode(m);
-
-    save_axis = 0;
-    save_n = 0;
-
+    save_axis = save_n = 0;
     return 0;
 }
 
-/* ===================== 자동 운전 ===================== */
+/* ===== 자동 운전 ===== */
 
-int save_busy(void)
-{
-    return seq != S_IDLE;
-}
+int save_busy(void) { return seq != S_IDLE; }
 
-/*
- * UART5 통신을 너무 자주 하지 않도록
- * 50ms마다 한 번만 확인한다.
- */
+/* UART5를 너무 자주 쓰지 않도록 50ms마다 한 번만 */
 static int poll50(void)
 {
-    uint32_t now =
-        HAL_GetTick();
+    uint32_t now = HAL_GetTick();
 
-    if (now - poll_t0 <
-        50U) {
-
-        return 0;
-    }
-
+    if (now - poll_t0 < 50U) return 0;
     poll_t0 = now;
-
     return 1;
 }
 
-/*
- * ROT가 실제로 정지한 뒤
- * 최종 위치가 허용 오차 안에 있는지 확인한다.
- */
+/* ROT가 정지했고 위치가 허용오차 안인지 확인 */
 static int rot_done(int target)
 {
     uint8_t state;
     int now;
 
-    if (!poll50()) {
-        return 0;
-    }
-
-    if (!mks_state(&state)) {
-        return 0;
-    }
-
-    /*
-     * F1=1: 모터 정지
-     */
-    if (state != 1U) {
-        return 0;
-    }
-
-    if (!mks_pos(&now)) {
-        return 0;
-    }
-
-    return
-        gap(now, target) <=
-        ROT_GAP;
+    if (!poll50() || !mks_state(&state)) return 0;
+    if (state != 1U) return 0;          /* F1=1 이면 정지 */
+    if (!mks_pos(&now)) return 0;
+    return gap(now, target) <= ROT_GAP;
 }
 
 static int xy_start(int xt, int yt)
 {
-    if (!motor_move(
-            &motorX,
-            X_RPM,
-            xt)) {
+    if (!motor_move(&motorX, X_RPM, xt)) { reply("XY X START FAIL\r\n"); return 0; }
 
-        reply(
-            "XY X START FAIL\r\n");
-
+    if (!motor_move(&motorY, Y_RPM, yt)) {
+        reply("XY Y START FAIL\r\n");
+        motor_stop(&motorX);
         return 0;
     }
 
-    if (!motor_move(
-            &motorY,
-            Y_RPM,
-            yt)) {
-
-        reply(
-            "XY Y START FAIL\r\n");
-
-        motor_stop(
-            &motorX);
-
-        return 0;
-    }
-
-    x_count = 0;
-    y_count = 0;
-
+    x_count = y_count = 0;
     return 1;
 }
 
+/* 두 축 모두 XY_STABLE번 연속 허용오차 안이어야 도착 */
 static int xy_done(int xt, int yt)
 {
-    int xok;
-    int yok;
+    int xok, yok;
 
-    if (!poll50()) {
-        return 0;
-    }
+    if (!poll50()) return 0;
 
-    /*
-     * 한 번 실패하면 한 번 더 읽는다.
-     */
-    xok =
-        motor_pos(
-            &motorX,
-            &x_now) ||
-        motor_pos(
-            &motorX,
-            &x_now);
+    /* 한 번 실패하면 한 번 더 읽는다 */
+    xok = motor_pos(&motorX, &x_now) || motor_pos(&motorX, &x_now);
+    yok = motor_pos(&motorY, &y_now) || motor_pos(&motorY, &y_now);
 
-    yok =
-        motor_pos(
-            &motorY,
-            &y_now) ||
-        motor_pos(
-            &motorY,
-            &y_now);
+    x_count = (xok && gap(x_now, xt) <= XY_GAP) ? x_count + 1 : 0;
+    y_count = (yok && gap(y_now, yt) <= XY_GAP) ? y_count + 1 : 0;
 
-    if (xok &&
-        gap(x_now, xt) <=
-        XY_GAP) {
-
-        x_count++;
-    }
-    else {
-        x_count = 0;
-    }
-
-    if (yok &&
-        gap(y_now, yt) <=
-        XY_GAP) {
-
-        y_count++;
-    }
-    else {
-        y_count = 0;
-    }
-
-    return
-        x_count >= XY_STABLE &&
-        y_count >= XY_STABLE;
-}
-
-/*
- * X와 Y 전체 위치 계산이 완료됐는지 확인한다.
- */
-static int all_saved(void)
-{
-    return
-        grid_ok() &&
-        data.x_ready &&
-        data.y_ready;
+    return x_count >= XY_STABLE && y_count >= XY_STABLE;
 }
 
 static void seq_reset(void)
 {
     seq = S_IDLE;
-
-    run_on = 0;
-
-    run_col = 1;
-    run_dan = 1;
-
-    side = 1;
-
-    stop_req = 0;
+    run_col = run_dan = 1;
 }
 
 static void seq_fail(const char *msg)
 {
     reply(msg);
-
     mks_stop();
-
-    motor_stop(
-        &motorX);
-
-    motor_stop(
-        &motorY);
-
+    motor_stop(&motorX);
+    motor_stop(&motorY);
     seq_reset();
+    seq_result = -1;
 }
 
-/*
- * 자동 run에서는 X 열을 먼저 증가시킨다.
- *
- * grid 4 3 예:
- * 1,1 -> 2,1 -> 3,1 -> 4,1
- * -> 1,2 -> 2,2 ... -> 4,3
- * -> 다시 1,1
- */
-static void next_xy(void)
+/* go X Y : 한 칸에 대해 사이클을 한 번만 돈다 */
+static int seq_start(int col, int dan)
 {
-    run_col++;
-
-    if (run_col >
-        data.x_n) {
-
-        run_col = 1;
-        run_dan++;
-    }
-
-    if (run_dan >
-        data.y_n) {
-
-        run_dan = 1;
-    }
-}
-
-static int seq_start(
-        int col,
-        int dan,
-        int repeat)
-{
-    if (!grid_ok() ||
-        !data.x_ready ||
-        !data.y_ready) {
-
-        return 0;
-    }
-
-    if (save_busy() ||
-        save_axis ||
-        !rot_homed ||
-        !x_homed ||
-        !y_homed) {
-
-        return 0;
-    }
-
-    if (col < 1 ||
-        col > data.x_n ||
-        dan < 1 ||
-        dan > data.y_n) {
-
-        return 0;
-    }
-
-    /*
-     * repeat=1은 자동 run이다.
-     */
-    if (repeat &&
-        !all_saved()) {
-
-        return 0;
-    }
+    if (!grid_ok() || !data.x_ready || !data.y_ready || !data.in_ready) return 0;
+    if (save_busy() || save_axis || !rot_homed || !x_homed || !y_homed) return 0;
+    if (col < 1 || col > data.x_n || dan < 1 || dan > data.y_n) return 0;
 
     run_col = col;
     run_dan = dan;
+    seq_result = 0;
 
-    run_on = repeat;
-
-    stop_req = 0;
-
-    /*
-     * 첫 ROT 이동은 R부터 시작한다.
-     */
-    side = 1;
-
-    seq = S_SIDE_START;
-
+    hold_t0 = HAL_GetTick();
+    seq = S_C1_START;
     return 1;
 }
 
-int save_go(int col, int dan)
-{
-    return seq_start(
-        col,
-        dan,
-        0);
-}
+int save_go(int col, int dan) { return seq_start(col, dan); }
 
-int save_auto(void)
-{
-    return seq_start(
-        1,
-        1,
-        1);
-}
-
-/*
- * 자동운전 또는 수동 위치 저장 이동을 즉시 정지한다.
- */
+/* 자동운전 또는 수동 저장 이동을 즉시 정지 */
 void save_stop(void)
 {
-    if (save_axis == AXIS_X) {
-        motor_stop(
-            &motorX);
+    if (save_axis == AXIS_X) { motor_stop(&motorX); save_axis = save_n = 0; }
+    else if (save_axis == AXIS_Y) { motor_stop(&motorY); save_axis = save_n = 0; }
 
-        save_axis = 0;
-        save_n = 0;
-    }
-    else if (save_axis ==
-             AXIS_Y) {
-
-        motor_stop(
-            &motorY);
-
-        save_axis = 0;
-        save_n = 0;
+    if (save_busy()) {
+        mks_stop();
+        motor_stop(&motorX);
+        motor_stop(&motorY);
+        seq_reset();
+        seq_result = -1;
     }
 
-    if (!save_busy()) {
-        return;
+    /* stop이면 go든 run이든 항상 ROT를 C로 되돌린다 */
+    if (rot_homed && tilt_ok) {
+        HAL_Delay(100);         /* mks_stop 감속이 끝날 시간 */
+        reply(move_rot(c_pos) ? "STOP C OK\r\n" : "STOP C FAIL\r\n");
     }
+}
 
-    stop_req = 1;
+/* 이동을 시작했으니 타임아웃 시계를 켠다 */
+static void seq_next(Seq s)
+{
+    move_t0 = HAL_GetTick();
+    poll_t0 = 0;
+    seq = s;
+}
 
-    mks_stop();
+/* 도착했으니 다음 단계로. HOLD_MS 대기부터 시작한다 */
+static void seq_done(Seq s)
+{
+    hold_t0 = HAL_GetTick();
+    seq = s;
+}
 
-    motor_stop(
-        &motorX);
+/* 대기 시간이 지났으면 1 */
+static int held(void)
+{
+    return HAL_GetTick() - hold_t0 >= HOLD_MS;
+}
 
-    motor_stop(
-        &motorY);
+/* ROT 이동 시작. 공통 부분이라 묶었다 */
+static int rot_go(int target, const char *fail_msg)
+{
+    if (!held()) return 0;
 
-    seq_reset();
+    if (!mks_move_abs(ROT_RPM, target)) {
+        seq_fail(fail_msg);
+        return 0;
+    }
+    return 1;
 }
 
 /*
- * 자동운전 상태머신
+ * 한 사이클 상태머신
+ * C -> 입력칸 -> R -> C -> 목표칸 -> L -> C -> 끝
  */
 static void seq_run(void)
 {
-    uint32_t now =
-        HAL_GetTick();
-
-    int xt =
-        data.x[run_col - 1];
-
-    int yt =
-        data.y[run_dan - 1];
-
-    int target =
-        (side > 0) ?
-        r_pos :
-        l_pos;
+    uint32_t now = HAL_GetTick();
+    int xt = data.x[run_col - 1];
+    int yt = data.y[run_dan - 1];
+    char msg[64];
 
     switch (seq) {
 
     case S_IDLE:
         return;
 
-    case S_SIDE_START:
-        if (!mks_move_abs(
-                ROT_RPM,
-                target)) {
-
-            seq_fail(
-                "ROT SIDE START FAIL\r\n");
-
-            return;
-        }
-
-        move_t0 = now;
-        poll_t0 = 0;
-
-        seq = S_SIDE_WAIT;
-
+    /* 1. ROT -> C */
+    case S_C1_START:
+        if (!rot_go(c_pos, "ROT C1 START FAIL\r\n")) return;
+        seq_next(S_C1_WAIT);
         return;
 
-    case S_SIDE_WAIT:
-        if (rot_done(target)) {
-            reply(
-                side > 0 ?
-                "ROT R OK\r\n" :
-                "ROT L OK\r\n");
-
-            seq = S_C_START;
-        }
-        else if (now - move_t0 >=
-                 TIMEOUT) {
-
-            seq_fail(
-                "ROT SIDE TIMEOUT\r\n");
-        }
-
+    case S_C1_WAIT:
+        if (rot_done(c_pos)) { reply("ROT C OK\r\n"); seq_done(S_IN_START); }
+        else if (now - move_t0 >= TIMEOUT) seq_fail("ROT C1 TIMEOUT\r\n");
         return;
 
-    case S_C_START:
-        if (!mks_move_abs(
-                ROT_RPM,
-                c_pos)) {
-
-            seq_fail(
-                "ROT C START FAIL\r\n");
-
-            return;
-        }
-
-        move_t0 = now;
-        poll_t0 = 0;
-
-        seq = S_C_WAIT;
-
+    /* 2. X/Y -> 입력칸 */
+    case S_IN_START:
+        if (!held()) return;
+        if (!xy_start(data.in_x, data.in_y)) { seq_fail("IN START FAIL\r\n"); return; }
+        seq_next(S_IN_WAIT);
         return;
 
-    case S_C_WAIT:
-        if (rot_done(c_pos)) {
-            reply(
-                "ROT C OK\r\n");
-
-            seq = S_XY_START;
+    case S_IN_WAIT:
+        if (xy_done(data.in_x, data.in_y)) {
+            motor_stop(&motorX);
+            motor_stop(&motorY);
+            reply("IN OK\r\n");
+            seq_done(S_R_START);
         }
-        else if (now - move_t0 >=
-                 TIMEOUT) {
-
-            seq_fail(
-                "ROT C TIMEOUT\r\n");
-        }
-
+        else if (now - move_t0 >= TIMEOUT) seq_fail("IN TIMEOUT\r\n");
         return;
 
+    /* 3. ROT -> R */
+    case S_R_START:
+        if (!rot_go(r_pos, "ROT R START FAIL\r\n")) return;
+        seq_next(S_R_WAIT);
+        return;
+
+    case S_R_WAIT:
+        if (rot_done(r_pos)) { reply("ROT R OK\r\n"); seq_done(S_C2_START); }
+        else if (now - move_t0 >= TIMEOUT) seq_fail("ROT R TIMEOUT\r\n");
+        return;
+
+    /* 4. ROT -> C */
+    case S_C2_START:
+        if (!rot_go(c_pos, "ROT C2 START FAIL\r\n")) return;
+        seq_next(S_C2_WAIT);
+        return;
+
+    case S_C2_WAIT:
+        if (rot_done(c_pos)) { reply("ROT C OK\r\n"); seq_done(S_XY_START); }
+        else if (now - move_t0 >= TIMEOUT) seq_fail("ROT C2 TIMEOUT\r\n");
+        return;
+
+    /* 5. X/Y -> 목표칸 */
     case S_XY_START:
-        if (!xy_start(
-                xt,
-                yt)) {
-
-            seq_fail(
-                "XY START FAIL\r\n");
-
-            return;
-        }
-
-        move_t0 = now;
-        poll_t0 = 0;
-
-        seq = S_XY_WAIT;
-
+        if (!held()) return;
+        if (!xy_start(xt, yt)) { seq_fail("XY START FAIL\r\n"); return; }
+        seq_next(S_XY_WAIT);
         return;
 
     case S_XY_WAIT:
-        if (xy_done(
-                xt,
-                yt)) {
+        if (xy_done(xt, yt)) {
+            motor_stop(&motorX);
+            motor_stop(&motorY);
 
-            char msg[64];
-
-            motor_stop(
-                &motorX);
-
-            motor_stop(
-                &motorY);
-
-            /*
-             * Python과 PowerShell이 읽기 쉬운 형식이다.
-             * UART3에도 같은 문장이 출력된다.
-             */
-            snprintf(
-                msg,
-                sizeof(msg),
-                "ARRIVE %d %d\r\n",
-                run_col,
-                run_dan);
-
+            /* Python과 PowerShell이 읽기 쉬운 형식 */
+            snprintf(msg, sizeof(msg), "ARRIVE %d %d\r\n", run_col, run_dan);
             reply(msg);
 
             data.last_x = x_now;
             data.last_y = y_now;
-
             data_write();
 
-            /*
-             * go 명령은 한 위치 이동 후 종료한다.
-             */
-            if (!run_on ||
-                stop_req) {
-
-                seq_reset();
-                return;
-            }
-
-            /*
-             * run 명령은 다음 grid 위치로 넘어간다.
-             */
-            next_xy();
-
-            side = -side;
-
-            seq = S_SIDE_START;
+            seq_done(S_L_START);
         }
-        else if (now - move_t0 >=
-                 TIMEOUT) {
+        else if (now - move_t0 >= TIMEOUT) seq_fail("XY TIMEOUT\r\n");
+        return;
 
-            seq_fail(
-                "XY TIMEOUT\r\n");
+    /* 6. ROT -> L */
+    case S_L_START:
+        if (!rot_go(l_pos, "ROT L START FAIL\r\n")) return;
+        seq_next(S_L_WAIT);
+        return;
+
+    case S_L_WAIT:
+        if (rot_done(l_pos)) { reply("ROT L OK\r\n"); seq_done(S_C3_START); }
+        else if (now - move_t0 >= TIMEOUT) seq_fail("ROT L TIMEOUT\r\n");
+        return;
+
+    /* 7. ROT -> C, 사이클 종료 */
+    case S_C3_START:
+        if (!rot_go(c_pos, "ROT C3 START FAIL\r\n")) return;
+        seq_next(S_C3_WAIT);
+        return;
+
+    case S_C3_WAIT:
+        if (rot_done(c_pos)) {
+            reply("ROT C OK\r\n");
+            reply("CYCLE END\r\n");
+            seq_reset();
+            seq_result = 1;
         }
-
+        else if (now - move_t0 >= TIMEOUT) seq_fail("ROT C3 TIMEOUT\r\n");
         return;
     }
 }
 
-/* ===================== 문자열 함수 ===================== */
+/* ===== 문자열 ===== */
 
 static void trim(char *s)
 {
-    size_t n =
-        strlen(s);
+    size_t n = strlen(s);
 
-    while (n &&
-           (s[n - 1] == '\r' ||
-            s[n - 1] == '\n' ||
-            s[n - 1] == ' ' ||
-            s[n - 1] == '\t')) {
-
-        s[--n] = 0;
-    }
+    while (n && (s[n - 1] == '\r' || s[n - 1] == '\n' ||
+                 s[n - 1] == ' '  || s[n - 1] == '\t')) s[--n] = 0;
 }
 
-/*
- * x4 또는 x4 save 형식을 검사한다.
- * y1 또는 y1 save도 같은 함수로 처리한다.
- */
-static int parse_save_cmd(
-        const char *cmd,
-        char axis,
-        int *n)
+/* x4 또는 x4 save 형식 확인. y도 같은 함수로 처리 */
+static int parse_save_cmd(const char *cmd, char axis, int *n)
 {
-    char short_cmd[24];
-    char long_cmd[32];
+    char short_cmd[24], long_cmd[32];
 
-    if (cmd[0] != axis) {
-        return 0;
-    }
+    if (cmd[0] != axis) return 0;
+    if (sscanf(&cmd[1], "%d", n) != 1) return 0;
 
-    if (sscanf(
-            &cmd[1],
-            "%d",
-            n) != 1) {
+    snprintf(short_cmd, sizeof(short_cmd), "%c%d", axis, *n);
+    snprintf(long_cmd, sizeof(long_cmd), "%c%d save", axis, *n);
 
-        return 0;
-    }
-
-    snprintf(
-        short_cmd,
-        sizeof(short_cmd),
-        "%c%d",
-        axis,
-        *n);
-
-    snprintf(
-        long_cmd,
-        sizeof(long_cmd),
-        "%c%d save",
-        axis,
-        *n);
-
-    return
-        !strcmp(cmd, short_cmd) ||
-        !strcmp(cmd, long_cmd);
+    return !strcmp(cmd, short_cmd) || !strcmp(cmd, long_cmd);
 }
 
-/* ===================== 상태 출력 ===================== */
+/* ===== 상태 출력 ===== */
 
+/* show : grid와 각 칸 위치를 mm로 출력 */
 static void show(void)
 {
     char msg[512];
     int k = 0;
 
-    k += snprintf(
-        &msg[k],
-        sizeof(msg) - k,
-        "GRID X=%d Y=%d\r\n",
-        data.x_n,
-        data.y_n);
+    k += snprintf(&msg[k], sizeof(msg) - k, "GRID X=%d Y=%d\r\nX:", data.x_n, data.y_n);
 
-    k += snprintf(
-        &msg[k],
-        sizeof(msg) - k,
-        "X:");
+    for (int i = 0; i < data.x_n && k < (int)sizeof(msg) - 24; i++)
+        k += snprintf(&msg[k], sizeof(msg) - k, " %d=%dmm", i + 1, MM(data.x[i]));
 
-    for (int i = 0;
-         i < data.x_n &&
-         k < (int)sizeof(msg) - 24;
-         i++) {
+    k += snprintf(&msg[k], sizeof(msg) - k, "\r\nY:");
 
-        k += snprintf(
-            &msg[k],
-            sizeof(msg) - k,
-            " %d=%dmm",
-            i + 1,
-            MM(data.x[i]));
-    }
+    for (int i = 0; i < data.y_n && k < (int)sizeof(msg) - 24; i++)
+        k += snprintf(&msg[k], sizeof(msg) - k, " %d=%dmm", i + 1, MM(data.y[i]));
 
-    k += snprintf(
-        &msg[k],
-        sizeof(msg) - k,
-        "\r\nY:");
-
-    for (int i = 0;
-         i < data.y_n &&
-         k < (int)sizeof(msg) - 24;
-         i++) {
-
-        k += snprintf(
-            &msg[k],
-            sizeof(msg) - k,
-            " %d=%dmm",
-            i + 1,
-            MM(data.y[i]));
-    }
-
-    snprintf(
-        &msg[k],
-        sizeof(msg) - k,
-        "\r\nX_READY=%d Y_READY=%d\r\n",
-        data.x_ready,
-        data.y_ready);
-
+    snprintf(&msg[k], sizeof(msg) - k,
+             "\r\nIN: x=%dmm y=%dmm\r\nX_READY=%d Y_READY=%d IN_READY=%d\r\n",
+             MM(data.in_x), MM(data.in_y),
+             data.x_ready, data.y_ready, data.in_ready);
     reply(msg);
 }
 
+/* status : 현재 모터 위치와 플래그를 한 줄로 출력 */
 static void status(void)
 {
     char msg[300];
-
-    int rot = 0;
-    int x = 0;
-    int y = 0;
+    int rot = 0, x = 0, y = 0;
 
     mks_pos(&rot);
-    motor_pos(
-        &motorX,
-        &x);
-    motor_pos(
-        &motorY,
-        &y);
+    motor_pos(&motorX, &x);
+    motor_pos(&motorY, &y);
 
-    snprintf(
-        msg,
-        sizeof(msg),
-        "grid=%d,%d rot_home=%d x_home=%d y_home=%d "
-        "x_ready=%d y_ready=%d c=%d r=%d l=%d "
-        "rot=%d x=%d y=%d step=%d,%d side=%c busy=%d save=%d\r\n",
-        data.x_n,
-        data.y_n,
-        rot_homed,
-        x_homed,
-        y_homed,
-        data.x_ready,
-        data.y_ready,
-        c_pos,
-        r_pos,
-        l_pos,
-        rot,
-        x,
-        y,
-        run_col,
-        run_dan,
-        side > 0 ? 'R' : 'L',
-        save_busy(),
-        save_axis);
-
+    snprintf(msg, sizeof(msg),
+             "grid=%d,%d rot_home=%d x_home=%d y_home=%d "
+             "x_ready=%d y_ready=%d in_ready=%d c=%d r=%d l=%d "
+             "rot=%d x=%d y=%d step=%d,%d busy=%d save=%d\r\n",
+             data.x_n, data.y_n, rot_homed, x_homed, y_homed,
+             data.x_ready, data.y_ready, data.in_ready, c_pos, r_pos, l_pos,
+             rot, x, y, run_col, run_dan,
+             save_busy(), save_axis);
     reply(msg);
 }
 
 static int rot_cmd(int target)
 {
-    return
-        rot_homed &&
-        !save_axis &&
-        !save_busy() &&
-        move_rot(target);
+    return rot_homed && !save_axis && !save_busy() && move_rot(target);
 }
 
-/* ===================== TCP 명령 처리 ===================== */
+/* ===== TCP 명령 처리 ===== */
 
 static void command(char *cmd)
 {
-    int a;
-    int b;
-
+    int a, b;
     char extra;
 
     trim(cmd);
 
-    /*
-     * 자동운전 중에는
-     * stop, status, show만 허용한다.
-     */
+    /* item 명령은 진행중에도 받는다. 미리 누르면 예약된다 */
+    if (item_cmd(cmd)) return;
+
+    /* 자동운전 중에는 stop, status, show만 허용 */
     if (save_busy() &&
-        strcmp(cmd, "stop") &&
-        strcmp(cmd, "status") &&
-        strcmp(cmd, "show")) {
-
-        reply(
-            "ERR RUNNING\r\n");
-
+        strcmp(cmd, "stop") && strcmp(cmd, "status") && strcmp(cmd, "show")) {
+        reply("ERR RUNNING\r\n");
         return;
     }
 
-    if (!strcmp(
-            cmd,
-            "status")) {
+    if (!strcmp(cmd, "status")) { status(); return; }
+    if (!strcmp(cmd, "show"))   { show();   return; }
 
-        status();
+    /* grid 4 5 : 정수 두 개만 있을 때 처리 */
+    if (sscanf(cmd, "grid %d %d %c", &a, &b, &extra) == 2) {
+        if (save_axis) reply("ERR SAVING\r\n");
+        else           grid_set(a, b);
         return;
     }
 
-    if (!strcmp(
-            cmd,
-            "show")) {
+    if (!strcmp(cmd, "rot c")) { reply(rot_cmd(c_pos) ? "OK C\r\n" : "ERR C\r\n"); return; }
+    if (!strcmp(cmd, "rot r")) { reply(rot_cmd(r_pos) ? "OK R\r\n" : "ERR R\r\n"); return; }
+    if (!strcmp(cmd, "rot l")) { reply(rot_cmd(l_pos) ? "OK L\r\n" : "ERR L\r\n"); return; }
 
-        show();
+    if (!strcmp(cmd, "home")) {
+        reply(save_home() ? "OK HOME\r\n" : "ERR HOME\r\n");
         return;
     }
 
-    /*
-     * grid 4 5
-     *
-     * 정확히 정수 두 개가 있을 때만 처리한다.
-     */
-    if (sscanf(
-            cmd,
-            "grid %d %d %c",
-            &a,
-            &b,
-            &extra) == 2) {
-
-        if (save_axis) {
-            reply(
-                "ERR SAVING\r\n");
-
-            return;
-        }
-
-        grid_set(
-            a,
-            b);
-
+    /* 저장이나 이동 전에 grid가 있어야 한다 */
+    if ((cmd[0] == 'x' || cmd[0] == 'y' ||
+         !strncmp(cmd, "go", 2) || !strcmp(cmd, "in")) && !grid_ok()) {
+        reply("GRID FIRST: grid X Y\r\n");
         return;
     }
 
-    if (!strcmp(cmd, "c")) {
-        reply(
-            rot_cmd(c_pos) ?
-            "OK C\r\n" :
-            "ERR C\r\n");
-
+    /* X 저장. grid 4 5면 x4, x3 */
+    if (parse_save_cmd(cmd, 'x', &a)) {
+        if (a != data.x_n && a != data.x_n - 1) reply("ERR X NUMBER\r\n");
+        else reply(save_start(AXIS_X, a) ? "X MOVE, PRESS S\r\n" : "X MOVE FAIL\r\n");
         return;
     }
 
-    if (!strcmp(cmd, "r")) {
-        reply(
-            rot_cmd(r_pos) ?
-            "OK R\r\n" :
-            "ERR R\r\n");
-
+    /* Y 저장은 y1, y2만 */
+    if (parse_save_cmd(cmd, 'y', &a)) {
+        if (a != 1 && a != 2) reply("ERR Y NUMBER\r\n");
+        else reply(save_start(AXIS_Y, a) ? "Y MOVE, PRESS S\r\n" : "Y MOVE FAIL\r\n");
         return;
     }
 
-    if (!strcmp(cmd, "l")) {
-        reply(
-            rot_cmd(l_pos) ?
-            "OK L\r\n" :
-            "ERR L\r\n");
-
+    /* 입력칸 저장. X와 Y가 같이 움직인다 */
+    if (!strcmp(cmd, "in")) {
+        reply(save_start(AXIS_IN, 0) ? "IN MOVE, PRESS S\r\n" : "IN MOVE FAIL\r\n");
         return;
     }
 
-    if (!strcmp(
-            cmd,
-            "home")) {
-
-        reply(
-            save_home() ?
-            "OK HOME\r\n" :
-            "ERR HOME\r\n");
-
-        return;
-    }
-
-    /*
-     * 위치 저장이나 이동 전에
-     * grid가 설정돼 있어야 한다.
-     */
-    if ((cmd[0] == 'x' ||
-         cmd[0] == 'y' ||
-         !strncmp(cmd, "go", 2) ||
-         !strcmp(cmd, "run")) &&
-        !grid_ok()) {
-
-        reply(
-            "GRID FIRST: grid X Y\r\n");
-
-        return;
-    }
-
-    /*
-     * X 저장 명령
-     *
-     * grid 4 5:
-     * x4, x3
-     *
-     * grid 6 5:
-     * x6, x5
-     */
-    if (parse_save_cmd(
-            cmd,
-            'x',
-            &a)) {
-
-        if (a != data.x_n &&
-            a != data.x_n - 1) {
-
-            reply(
-                "ERR X NUMBER\r\n");
-
-            return;
-        }
-
-        reply(
-            save_start(
-                AXIS_X,
-                a) ?
-            "X MOVE, PRESS S\r\n" :
-            "X MOVE FAIL\r\n");
-
-        return;
-    }
-
-    /*
-     * Y 저장 명령은 y1, y2만 사용한다.
-     */
-    if (parse_save_cmd(
-            cmd,
-            'y',
-            &a)) {
-
-        if (a != 1 &&
-            a != 2) {
-
-            reply(
-                "ERR Y NUMBER\r\n");
-
-            return;
-        }
-
-        reply(
-            save_start(
-                AXIS_Y,
-                a) ?
-            "Y MOVE, PRESS S\r\n" :
-            "Y MOVE FAIL\r\n");
-
-        return;
-    }
-
-    /*
-     * 현재 움직이던 X 또는 Y 위치를 저장한다.
-     */
+    /* 움직이던 X, Y 또는 입력칸 위치를 저장 */
     if (!strcmp(cmd, "s")) {
-        reply(
-            save_end() ?
-            "SAVE OK\r\n" :
-            "SAVE FAIL\r\n");
-
+        reply(save_end() ? "SAVE OK\r\n" : "SAVE FAIL\r\n");
         return;
     }
 
-    /*
-     * go 4 5
-     */
-    if (sscanf(
-            cmd,
-            "go %d %d %c",
-            &a,
-            &b,
-            &extra) == 2) {
-
-        reply(
-            save_go(
-                a,
-                b) ?
-            "OK GO\r\n" :
-            "ERR GO\r\n");
-
+    /* go 4 5 */
+    if (sscanf(cmd, "go %d %d %c", &a, &b, &extra) == 2) {
+        reply(save_go(a, b) ? "OK GO\r\n" : "ERR GO\r\n");
         return;
     }
 
-    /*
-     * go 3
-     * X3, Y3으로 이동한다.
-     */
-    if (sscanf(
-            cmd,
-            "go %d %c",
-            &a,
-            &extra) == 1) {
-
-        reply(
-            save_go(
-                a,
-                a) ?
-            "OK GO\r\n" :
-            "ERR GO\r\n");
-
+    /* go 3 : X3, Y3으로 이동 */
+    if (sscanf(cmd, "go %d %c", &a, &extra) == 1) {
+        reply(save_go(a, a) ? "OK GO\r\n" : "ERR GO\r\n");
         return;
     }
 
-    /*
-     * grid 전체를 순서대로 반복한다.
-     */
-    if (!strcmp(cmd, "run")) {
-        reply(
-            save_auto() ?
-            "OK RUN\r\n" :
-            "ERR RUN\r\n");
-
-        return;
-    }
-
-    if (!strcmp(cmd, "stop")) {
-        save_stop();
-
-        reply(
-            "OK STOP\r\n");
-
-        return;
-    }
+    if (!strcmp(cmd, "stop")) { save_stop(); reply("OK STOP\r\n"); return; }
 
     reply("ERR CMD\r\n");
 }
 
-void save_cmd(char *cmd)
-{
-    command(cmd);
-}
+void save_cmd(char *cmd) { command(cmd); }
 
-/* ===================== 초기화 ===================== */
+/* ===== 초기화 ===== */
 
 void save_init(void)
 {
-    int mok;
-    int xok;
-    int yok;
+    int mok, xok, yok;
+    char msg[64];
 
     HAL_Delay(1000);
-
     data_read();
+    item_init();
 
     mok = mks_init();
+    print(mok ? "MKS INIT OK\r\n" : "MKS INIT FAIL\r\n");
+    if (!mok) return;
 
-    print(
-        mok ?
-        "MKS INIT OK\r\n" :
-        "MKS INIT FAIL\r\n");
+    yok = motor_init(&motorY, 1);       /* Y = UART5, AIMotor ID1 */
+    print(yok ? "Y INIT OK\r\n" : "Y INIT FAIL\r\n");
 
-    if (!mok) {
-        return;
-    }
+    xok = motor_init(&motorX, 0);       /* X = UART4, AIMotor ID1 */
+    print(xok ? "X INIT OK\r\n" : "X INIT FAIL\r\n");
 
-    /*
-     * Y는 UART5, AIMotor ID1
-     */
-    yok = motor_init(
-        &motorY,
-        1);
+    /* 부팅 시 센서를 찾아 C를 잡는다 */
+    if (!rot_home_c()) { print("ROT C SET FAIL\r\n"); return; }
+    print("ROT C SET OK\r\n");
 
-    print(
-        yok ?
-        "Y INIT OK\r\n" :
-        "Y INIT FAIL\r\n");
-
-    /*
-     * X는 UART4, AIMotor ID1
-     */
-    xok = motor_init(
-        &motorX,
-        0);
-
-    print(
-        xok ?
-        "X INIT OK\r\n" :
-        "X INIT FAIL\r\n");
-
-    /*
-     * 전원 ON 당시 ROT 위치를 C로 설정한다.
-     */
-    if (!rot_init_c()) {
-        print(
-            "ROT C SET FAIL\r\n");
-
-        return;
-    }
-
-    print(
-        "ROT C SET OK\r\n");
-
-    /*
-     * X/Y는 home 명령을 실행해야
-     * 원점 완료 상태가 된다.
-     */
+    /* X/Y는 home 명령을 해야 원점 완료가 된다 */
     x_homed = 0;
     y_homed = 0;
 
-    if (xok && yok) {
-        print(
-            "INIT OK\r\n");
-    }
+    print((xok && yok) ? "INIT OK\r\n" : "ROT OK, XY INIT FAIL\r\n");
+
+    if (!grid_ok()) print("GRID FIRST: grid X Y\r\n");
     else {
-        print(
-            "ROT OK, XY INIT FAIL\r\n");
-    }
-
-    if (!grid_ok()) {
-        print(
-            "GRID FIRST: grid X Y\r\n");
-    }
-    else {
-        char msg[64];
-
-        snprintf(
-            msg,
-            sizeof(msg),
-            "GRID LOAD X=%d Y=%d\r\n",
-            data.x_n,
-            data.y_n);
-
+        snprintf(msg, sizeof(msg), "GRID LOAD X=%d Y=%d\r\n", data.x_n, data.y_n);
         print(msg);
     }
 }
 
 void save_run(void)
 {
-    if (save_busy()) {
-        seq_run();
-    }
+    if (save_busy()) seq_run();
+
+    item_run();
 }
