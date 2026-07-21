@@ -1,5 +1,19 @@
 # TCP 코드 
+$addr=Read-Host '장비 IP 또는 VPN 주소';$port=2500;$c=New-Object System.Net.Sockets.TcpClient;$s=$null;$quit=$false;try{$c.Connect($addr,$port);$s=$c.GetStream();$e=[System.Text.Encoding]::ASCII;$b=New-Object byte[] 4096;function Send-Cmd([string]$x){$tx=$e.GetBytes($x+"`r`n");$s.Write($tx,0,$tx.Length);$s.Flush()};function Read-Reply([int]$timeout=300000){$limit=(Get-Date).AddMilliseconds($timeout);while(-not $s.DataAvailable){if((Get-Date)-ge $limit){throw '응답 시간 초과'};Start-Sleep -Milliseconds 20};$quiet=(Get-Date).AddMilliseconds(150);do{while($s.DataAvailable){$n=$s.Read($b,0,$b.Length);if($n -le 0){throw '장비가 연결을 종료했습니다.'};Write-Host -NoNewline $e.GetString($b,0,$n);$quiet=(Get-Date).AddMilliseconds(150)};Start-Sleep -Milliseconds 20}while((Get-Date)-lt $quiet)};Write-Host "연결됨: $addr`:$port";Read-Reply 5000;while(-not $quit){$cmd=(Read-Host 'TCP').Trim();if(-not $cmd){continue};if($cmd.ToLower() -eq 'exit'){break};Send-Cmd $cmd;if($cmd.ToLower() -eq 'run'){Read-Reply 5000;Write-Host "`nRUN 감시 중: S=stop, T=status, H=show, Q=stop 후 종료";$watch=$true;while($watch){while($s.DataAvailable){$n=$s.Read($b,0,$b.Length);if($n -le 0){throw '장비가 연결을 종료했습니다.'};$text=$e.GetString($b,0,$n);Write-Host -NoNewline $text;if($text -match 'FAIL|TIMEOUT'){$watch=$false}};if([Console]::KeyAvailable){$k=[Console]::ReadKey($true).KeyChar.ToString().ToLower();switch($k){'s'{Send-Cmd 'stop';$watch=$false};'t'{Send-Cmd 'status'};'h'{Send-Cmd 'show'};'q'{Send-Cmd 'stop';$watch=$false;$quit=$true}}};Start-Sleep -Milliseconds 30};if($s.DataAvailable){Read-Reply 5000}}else{Read-Reply 300000}}}catch{Write-Host "`n오류: $($_.Exception.Message)"}finally{if($s){$s.Close()};if($c){$c.Close()}}
 
- $addr=Read-Host '장비 IP 또는 VPN 주소';$port=2500;$c=New-Object System.Net.Sockets.TcpClient;$s=$null;try{$c.Connect($addr,$port);$s=$c.GetStream();$s.ReadTimeout=300000;$e=[System.Text.Encoding]::ASCII;$b=New-Object byte[] 1024;Write-Host "연결됨: $addr`:$port (exit 입력 시 종료)";while($true){$cmd=Read-Host 'TCP';if($cmd.Trim().ToLower() -eq 'exit'){break};$tx=$e.GetBytes($cmd+"`r`n");$s.Write($tx,0,$tx.Length);$s.Flush();try{$n=$s.Read($b,0,$b.Length);if($n -eq 0){Write-Host '장비가 연결을 종료했습니다.';break};$out=$e.GetString($b,0,$n);Start-Sleep -Milliseconds 100;while($s.DataAvailable){$n=$s.Read($b,0,$b.Length);if($n -le 0){break};$out+=$e.GetString($b,0,$n);Start-Sleep -Milliseconds 30};Write-Host $out.TrimEnd()}catch{Write-Host "응답 오류: $($_.Exception.Message)"}}}catch{Write-Host "연결 실패: $($_.Exception.Message)"}finally{if($s){$s.Close()};if($c){$c.Close()}}
- <img width="1086" height="146" alt="image" src="https://github.com/user-attachments/assets/624da041-601a-4c2d-a19e-4a7cd024d298" />
+## 테스트 방법 순서 
+grid 4 5
+home
+x4
+s
+x3
+s
+y1
+s
+y2
+s
+show
+status
+go 1 1
+run
 
