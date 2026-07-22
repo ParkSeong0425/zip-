@@ -4,6 +4,7 @@
 #include "fram.h"
 #include "tcp.h"
 #include "item.h"
+#include "button.h"
 #include <stddef.h>
 #include <stdint.h>
 #include <stdio.h>
@@ -12,10 +13,10 @@
 
 /* ===== 설정값 ===== */
 
-#define ROT_RPM         2500
+#define ROT_RPM         1500
 #define X_RPM           1000
 #define Y_RPM           1000
-#define HOME_RPM        20      /* 원점 탐색 속도. 100이면 초당 267mm로 너무 빠름 */
+#define HOME_RPM        100      /* 원점 탐색 속도. 100이면 초당 267mm로 너무 빠름 */
 
 #define TIMEOUT         60000U
 #define HOME_TIMEOUT    65000U
@@ -23,7 +24,7 @@
 #define ROT_GAP         300     /* ROT 도착 허용오차 */
 #define XY_GAP          1000    /* XY 도착 허용오차 */
 #define XY_STABLE       2       /* 연속 몇 번 들어와야 도착 */
-#define HOLD_MS         500U    /* 한 단계 도착 후 대기 시간 */
+#define HOLD_MS         100U    /* 단계 사이 대기: 500ms -> 100ms */
 
 #define MAX_X           8
 #define MAX_Y           8
@@ -216,35 +217,58 @@ static int rot_home_c(void)
 static int home_xy(void)
 {
     uint32_t t0;
-    int xd = 0, yd = 0, xs, ys;
+    int xd, yd, xs, ys;
 
-    print("HOME XY START\r\n");
+    print("HOME XY START 100RPM\r\n");
 
     if (!motor_speed_mode(&motorX) || !motor_speed_mode(&motorY)) goto fail;
-    if (!motor_speed(&motorX, -HOME_RPM)) goto fail;    /* X 홈 방향 */
-    if (!motor_speed(&motorY,  HOME_RPM)) goto fail;    /* Y 홈 방향 */
+
+    /* 이미 센서가 눌린 축은 순간적으로 움직이지 않게 먼저 확인한다. */
+    xs = motor_home_on(&motorX);
+    ys = motor_home_on(&motorY);
+    if (xs < 0 || ys < 0) goto fail;
+
+    xd = (xs == 1);
+    yd = (ys == 1);
+
+    if (xd) print("HOME X ALREADY SENSOR\r\n");
+    else if (!motor_speed(&motorX, -HOME_RPM)) goto fail; /* X 역방향 */
+
+    if (yd) print("HOME Y ALREADY SENSOR\r\n");
+    else if (!motor_speed(&motorY,  HOME_RPM)) goto fail; /* Y 정방향 */
 
     t0 = HAL_GetTick();
 
     while (HAL_GetTick() - t0 < HOME_TIMEOUT) {
+        if (button_stop_requested()) goto fail;
+
         if (!xd) {
             xs = motor_home_on(&motorX);
             if (xs < 0) goto fail;
-            if (xs == 1) { motor_speed(&motorX, 0); xd = 1; print("HOME X SENSOR\r\n"); }
+            if (xs == 1) {
+                motor_speed(&motorX, 0);
+                xd = 1;
+                print("HOME X SENSOR\r\n");
+            }
         }
+
         if (!yd) {
             ys = motor_home_on(&motorY);
             if (ys < 0) goto fail;
-            if (ys == 1) { motor_speed(&motorY, 0); yd = 1; print("HOME Y SENSOR\r\n"); }
+            if (ys == 1) {
+                motor_speed(&motorY, 0);
+                yd = 1;
+                print("HOME Y SENSOR\r\n");
+            }
         }
+
         if (xd && yd) break;
         HAL_Delay(10);
     }
 
     if (!xd || !yd) goto fail;
-    HAL_Delay(50);      /* 감속이 끝날 시간 */
+    HAL_Delay(50);
 
-    /* 센서에서 멈춘 위치를 소프트웨어 0으로 */
     if (!motor_zero(&motorX) || !motor_zero(&motorY)) goto fail;
     if (!motor_pos_mode(&motorX) || !motor_pos_mode(&motorY)) goto fail;
 
@@ -925,15 +949,27 @@ void save_init(void)
     xok = motor_init(&motorX, 0);       /* X = UART4, AIMotor ID1 */
     print(xok ? "X INIT OK\r\n" : "X INIT FAIL\r\n");
 
-    /* 부팅 시 센서를 찾아 C를 잡는다 */
-    if (!rot_home_c()) { print("ROT C SET FAIL\r\n"); return; }
-    print("ROT C SET OK\r\n");
+    if (!xok || !yok) {
+        print("XY INIT FAIL\r\n");
+        return;
+    }
 
-    /* X/Y는 home 명령을 해야 원점 완료가 된다 */
-    x_homed = 0;
-    y_homed = 0;
+    /* 부팅 시 ROT 홈 완료 후 X/Y가 각자의 DI1을 찾는다. */
+    if (!rot_home_c()) {
+        print("HOME ROT FAIL\r\n");
+        return;
+    }
 
-    print((xok && yok) ? "INIT OK\r\n" : "ROT OK, XY INIT FAIL\r\n");
+    print("HOME ROT OK\r\n");
+
+    if (!home_xy()) {
+        print("HOME XY FAIL\r\n");
+        return;
+    }
+
+    /* home_xy()가 x_homed/y_homed를 1로 만들므로 다시 0으로 지우지 않는다. */
+    print("POWER HOME OK\r\n");
+    print("INIT OK\r\n");
 
     if (!grid_ok()) print("GRID FIRST: grid X Y\r\n");
     else {

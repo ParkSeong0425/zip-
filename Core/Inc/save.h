@@ -17,4 +17,10 @@ int save_result(void);
 int save_grid_x(void);
 int save_grid_y(void);
 
+void save_abort(void);
+int save_pause(void);
+int save_paused(void);
+int save_resume(void);
+int save_ready(void);
+
 #endif

@@ -17,4 +17,10 @@ void item_run(void);
 /* 명령을 처리했으면 1, 모르는 명령이면 0 */
 int item_cmd(char *cmd);
 
+int item_auto_start(void);
+
+void item_auto_stop(void);
+
+int item_auto_on(void);
+
 #endif

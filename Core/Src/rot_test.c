@@ -36,6 +36,10 @@ extern UART_HandleTypeDef huart5;
 
 #define C_CURRENT       0x83U
 
+#define C_MSTEP         0x84U
+
+#define C_READ_CFG      0x47U
+
 #define C_RESPOND       0x8CU
 
 #define C_HOME_PARAM    0x90U
@@ -69,8 +73,12 @@ extern UART_HandleTypeDef huart5;
 #define HOME_END        0U
 
 #define HOME_TIMEOUT    65000U
+#define HOME_BACK_AXIS  0x3555  /* R(+) 방향 약 300도 */
 
-#define MOVE_ACC        255U
+#define MOVE_ACC        255U    /* 255=가장 빠른 램프, 0=가감속 없음 */
+
+#define MODE_SR_VFOC    5U
+#define NORMAL_MSTEP    16U
 
 
 
@@ -479,6 +487,23 @@ static int read8(uint8_t cmd, uint8_t *out)
 }
 
 
+/* 저장된 모드, 전류, 분주값을 읽는다. 47H 응답은 총 38바이트다. */
+static int read_cfg(uint8_t *mode, uint16_t *ma, uint8_t *mstep)
+{
+    uint8_t tx[4] = { TX_HEAD, ID, C_READ_CFG, 0 };
+    uint8_t rx[38];
+
+    tx[3] = sum8(tx, 3);
+
+    if (!xfer(tx, 4, rx, 38) || !frame_ok(rx, 38, C_READ_CFG)) return 0;
+
+    *mode = rx[3];
+    *ma = ((uint16_t)rx[4] << 8) | rx[5];
+    *mstep = rx[7];
+    return 1;
+}
+
+
 
 /* 48bit 부호값을 int로 변환해 읽는다 */
 
@@ -567,6 +592,25 @@ static int write_axis(uint8_t cmd, uint16_t rpm, uint8_t acc, int target)
 }
 
 
+/* ROT 홈 전 R(+) 방향으로 약 0.5초 분량 이탈한다. */
+static int home_back(void)
+{
+    uint32_t t0;
+    uint8_t state;
+
+    if (!write_axis(C_REL, HOME_RPM, MOVE_ACC, HOME_BACK_AXIS)) return 0;
+
+    t0 = HAL_GetTick();
+    while (HAL_GetTick() - t0 < 5000U) {
+        if (read8(C_STATE, &state) && state == 1U) return 1;
+        HAL_Delay(20);
+    }
+
+    write_axis(C_REL, 0, MOVE_ACC, 0);
+    return 0;
+}
+
+
 
 /* ===== 공개 함수 ===== */
 
@@ -577,59 +621,56 @@ static int write_axis(uint8_t cmd, uint16_t rpm, uint8_t acc, int target)
 int mks_init(void)
 
 {
-
-    uint8_t state = 0;
-
+    uint8_t state = 0, mode = 0xFF, mstep = 0xFF;
+    uint16_t ma = 0;
+    char b[80];
     int ok = 0;
-
-
 
     HAL_Delay(1500);
 
-
-
     for (int i = 0; i < 10; i++) {
-
         if (probe_f1(&state)) { ok = 1; break; }
-
         HAL_Delay(300);
-
     }
 
-
-
     if (!ok) { print("MKS F1 FAIL\r\n"); return 0; }
-
     print("MKS F1 OK\r\n");
 
-    HAL_Delay(50);
+    /* 1000과 3000이 같은 속도로 보이는 가장 흔한 원인을 확인한다. */
+    if (read_cfg(&mode, &ma, &mstep)) {
+        snprintf(b, sizeof(b), "MKS CFG mode=%u ma=%u mstep=%u\r\n",
+                 mode, ma, mstep);
+        print(b);
+    } else {
+        print("MKS CFG READ FAIL\r\n");
+    }
 
+    /* 직렬 vFOC가 아니면 속도가 400/1500rpm으로 제한될 수 있다. */
+    if (mode != MODE_SR_VFOC) {
+        if (!set1(C_MODE, MODE_SR_VFOC)) {
+            print("MKS 82 FAIL\r\n");
+            return 0;
+        }
+        print("MKS MODE SR_vFOC\r\n");
+        HAL_Delay(100);
+    }
 
+    /* 128분주에서는 명령 속도가 1/8로 줄어드므로 16분주로 맞춘다. */
+    if (mstep != 16U && mstep != 32U && mstep != 64U) {
+        if (!set1(C_MSTEP, NORMAL_MSTEP)) {
+            print("MKS 84 FAIL\r\n");
+            return 0;
+        }
+        print("MKS MSTEP 16\r\n");
+        HAL_Delay(100);
+    }
 
     if (!set2(C_RESPOND, 1U, 0U)) { print("MKS 8C FAIL\r\n"); return 0; }
+    if (!home_param())             { print("MKS 90 FAIL\r\n"); return 0; }
+    if (!set1(C_ENABLE, 1U))       { print("MKS F3 FAIL\r\n"); return 0; }
 
-    print("MKS 8C OK\r\n");
-
-    HAL_Delay(50);
-
-
-
-    if (!home_param()) { print("MKS 90 FAIL\r\n"); return 0; }
-
-    print("MKS 90 OK\r\n");
-
-    HAL_Delay(50);
-
-
-
-    if (!set1(C_ENABLE, 1U)) { print("MKS F3 FAIL\r\n"); return 0; }
-
-    print("MKS F3 OK\r\n");
-
-
-
+    print("MKS INIT OK\r\n");
     return 1;
-
 }
 
 
@@ -684,6 +725,10 @@ int mks_home(void)
 
 
 
+    print("MKS HOME BACK R\r\n");
+    if (!home_back()) return 0;
+
+    print("MKS HOME CW 100RPM\r\n");
     if (!cmd0(C_HOME, &v)) return 0;
 
     if (v == 2U) return 1;
@@ -723,11 +768,15 @@ int mks_home(void)
 int mks_move_abs(int rpm, int target)
 
 {
+    char b[64];
 
-    return rpm >= 1 && rpm <= 3000 &&
+    if (rpm < 1 || rpm > 3000) return 0;
 
-           write_axis(C_ABS, (uint16_t)rpm, MOVE_ACC, target);
+    snprintf(b, sizeof(b), "MKS MOVE rpm=%d acc=%u target=%d\r\n",
+             rpm, MOVE_ACC, target);
+    print(b);
 
+    return write_axis(C_ABS, (uint16_t)rpm, MOVE_ACC, target);
 }
 
 
