@@ -12,27 +12,17 @@
 
 #include <string.h>
 
-
-
 extern SPI_HandleTypeDef hspi1;
 
-
-
-/* ===== W6100 ÏÑ§Ï†ï ===== */
-
-
+/* ===== W6100 º≥¡§ ===== */
 
 #define CS_PORT     GPIOA
 
 #define CS_PIN      GPIO_PIN_0
 
-
-
 #define RST_PORT    GPIOE
 
 #define RST_PIN     GPIO_PIN_0
-
-
 
 #define SOCK_NUM    0
 
@@ -40,11 +30,7 @@ extern SPI_HandleTypeDef hspi1;
 
 #define BUF_SIZE    64
 
-
-
-/* ===== TCP Î≤ÑÌçº ===== */
-
-
+/* ===== TCP πˆ∆€ ===== */
 
 static uint8_t rx_buf[BUF_SIZE + 1];
 
@@ -52,420 +38,345 @@ static char line_buf[BUF_SIZE + 1];
 
 static int line_len;
 
-
-
 static uint8_t sock_status = SOCK_CLOSED;
 
-
-
-/* ÏÉà Ïó∞Í≤∞ÎßàÎã§ ÏïàÎÇ¥Î¨∏ÏùÑ Ìïú Î≤àÎßå Ï∂úÎ†• */
+/* ªı ø¨∞·∏∂¥Ÿ æ»≥ªπÆ¿ª «— π¯∏∏ √‚∑¬ */
 
 static uint8_t greeted;
 
-
-
 /* ===== W6100 SPI ===== */
-
-
 
 static void w6100_cs_sel(void)
 
 {
 
-    HAL_GPIO_WritePin(CS_PORT, CS_PIN, GPIO_PIN_RESET);
+	HAL_GPIO_WritePin(CS_PORT, CS_PIN, GPIO_PIN_RESET);
 
 }
-
-
 
 static void w6100_cs_desel(void)
 
 {
 
-    HAL_GPIO_WritePin(CS_PORT, CS_PIN, GPIO_PIN_SET);
+	HAL_GPIO_WritePin(CS_PORT, CS_PIN, GPIO_PIN_SET);
 
 }
-
-
 
 static uint8_t w6100_spi_rb(void)
 
 {
 
-    uint8_t tx = 0xFF, rx = 0;
+	uint8_t tx = 0xFF, rx = 0;
 
+	HAL_SPI_TransmitReceive(&hspi1, &tx, &rx, 1, 100);
 
-
-    HAL_SPI_TransmitReceive(&hspi1, &tx, &rx, 1, 100);
-
-    return rx;
+	return rx;
 
 }
-
-
 
 static void w6100_spi_wb(uint8_t b)
 
 {
 
-    HAL_SPI_Transmit(&hspi1, &b, 1, 100);
+	HAL_SPI_Transmit(&hspi1, &b, 1, 100);
 
 }
-
-
 
 static void w6100_spi_rbuf(uint8_t *buf, datasize_t len)
 
 {
 
-    uint8_t tx = 0xFF;
+	uint8_t tx = 0xFF;
 
+	for (datasize_t i = 0; i < len; i++)
 
-
-    for (datasize_t i = 0; i < len; i++)
-
-        HAL_SPI_TransmitReceive(&hspi1, &tx, &buf[i], 1, 100);
+		HAL_SPI_TransmitReceive(&hspi1, &tx, &buf[i], 1, 100);
 
 }
-
-
 
 static void w6100_spi_wbuf(uint8_t *buf, datasize_t len)
 
 {
 
-    HAL_SPI_Transmit(&hspi1, buf, (uint16_t)len, 100);
+	HAL_SPI_Transmit(&hspi1, buf, (uint16_t) len, 100);
 
 }
-
-
 
 static void w6100_reset(void)
 
 {
 
-    HAL_GPIO_WritePin(RST_PORT, RST_PIN, GPIO_PIN_RESET);
+	HAL_GPIO_WritePin(RST_PORT, RST_PIN, GPIO_PIN_RESET);
 
-    HAL_Delay(1);
+	HAL_Delay(1);
 
-    HAL_GPIO_WritePin(RST_PORT, RST_PIN, GPIO_PIN_SET);
+	HAL_GPIO_WritePin(RST_PORT, RST_PIN, GPIO_PIN_SET);
 
-    HAL_Delay(65);
+	HAL_Delay(65);
 
 }
 
-
-
-/* ===== ÎÑ§Ìä∏ÏõåÌÅ¨ Ï¥àÍ∏∞Ìôî ===== */
-
-
+/* ===== ≥◊∆Æøˆ≈© √ ±‚»≠ ===== */
 
 static void net_init(void)
 
 {
 
-    uint8_t mem[16] = { 2, 2, 2, 2, 2, 2, 2, 2,
+	uint8_t mem[16] = { 2, 2, 2, 2, 2, 2, 2, 2,
 
-                        2, 2, 2, 2, 2, 2, 2, 2 };
+	2, 2, 2, 2, 2, 2, 2, 2 };
 
-    wiz_NetInfo net;
+	wiz_NetInfo net;
 
-    uint8_t lock = SYS_NET_LOCK;
+	uint8_t lock = SYS_NET_LOCK;
 
+	net.mac[0] = 0x00;
+	net.mac[1] = 0x08;
+	net.mac[2] = 0xDC;
 
+	net.mac[3] = 0x11;
+	net.mac[4] = 0x11;
+	net.mac[5] = 0x13;
 
-    net.mac[0] = 0x00; net.mac[1] = 0x08; net.mac[2] = 0xDC;
+	net.ip[0] = 172;
+	net.ip[1] = 20;
+	net.ip[2] = 0;
+	net.ip[3] = 101;
 
-    net.mac[3] = 0x11; net.mac[4] = 0x11; net.mac[5] = 0x13;
+	net.sn[0] = 255;
+	net.sn[1] = 255;
+	net.sn[2] = 0;
+	net.sn[3] = 0;
 
+	net.gw[0] = 172;
+	net.gw[1] = 20;
+	net.gw[2] = 0;
+	net.gw[3] = 1;
 
+	net.dns[0] = 8;
+	net.dns[1] = 8;
+	net.dns[2] = 8;
+	net.dns[3] = 8;
 
-    net.ip[0] = 172; net.ip[1] = 20; net.ip[2] = 0;   net.ip[3] = 101;
+	net.ipmode = NETINFO_STATIC_V4;
 
-    net.sn[0] = 255; net.sn[1] = 255; net.sn[2] = 0;  net.sn[3] = 0;
+	w6100_cs_desel();
 
-    net.gw[0] = 172; net.gw[1] = 20;  net.gw[2] = 0;  net.gw[3] = 1;
+	HAL_GPIO_WritePin(RST_PORT, RST_PIN, GPIO_PIN_SET);
 
-    net.dns[0] = 8;  net.dns[1] = 8;  net.dns[2] = 8; net.dns[3] = 8;
+	reg_wizchip_cs_cbfunc(w6100_cs_sel, w6100_cs_desel);
 
+	reg_wizchip_spi_cbfunc(w6100_spi_rb, w6100_spi_wb,
 
+	w6100_spi_rbuf, w6100_spi_wbuf);
 
-    net.ipmode = NETINFO_STATIC_V4;
+	w6100_reset();
 
+	ctlwizchip(CW_INIT_WIZCHIP, mem);
 
+	ctlwizchip(CW_SYS_UNLOCK, &lock);
 
-    w6100_cs_desel();
-
-    HAL_GPIO_WritePin(RST_PORT, RST_PIN, GPIO_PIN_SET);
-
-
-
-    reg_wizchip_cs_cbfunc(w6100_cs_sel, w6100_cs_desel);
-
-    reg_wizchip_spi_cbfunc(w6100_spi_rb, w6100_spi_wb,
-
-                           w6100_spi_rbuf, w6100_spi_wbuf);
-
-
-
-    w6100_reset();
-
-
-
-    ctlwizchip(CW_INIT_WIZCHIP, mem);
-
-    ctlwizchip(CW_SYS_UNLOCK, &lock);
-
-    ctlnetwork(CN_SET_NETINFO, &net);
+	ctlnetwork(CN_SET_NETINFO, &net);
 
 }
 
+/* ===== TCP ¿¿¥‰ ===== */
 
-
-/* ===== TCP ÏùëÎãµ ===== */
-
-
-
-/* Î™®Îì† ÏùëÎãµÏùÄ UART3ÏóêÎèÑ Í∞ôÏù¥ Ï∂úÎ†•ÌïúÎã§ */
+/* ∏µÁ ¿¿¥‰¿∫ UART3ø°µµ ∞∞¿Ã √‚∑¬«—¥Ÿ */
 
 void tcp_reply(const char *s)
 
 {
 
-    print(s);
+	print(s);
 
+	if (sock_status == SOCK_ESTABLISHED)
 
-
-    if (sock_status == SOCK_ESTABLISHED)
-
-        send(SOCK_NUM, (uint8_t *)s, (uint16_t)strlen(s));
+		send(SOCK_NUM, (uint8_t*) s, (uint16_t) strlen(s));
 
 }
 
-
-
-/* ===== Ï†ëÏÜç ÏïàÎÇ¥ ===== */
-
-
+/* ===== ¡¢º” æ»≥ª ===== */
 
 static void send_guide(void)
 
 {
 
-    char status_cmd[] = "status";
+	char status_cmd[] = "status";
 
+	tcp_reply(
 
+	"\r\n"
 
-    tcp_reply(
+			"===== MOTOR CONTROL =====\r\n"
 
-        "\r\n"
+			"1. GRID SET : grid X Y\r\n"
 
-        "===== MOTOR CONTROL =====\r\n"
+			"   EXAMPLE  : grid 4 5\r\n"
 
-        "1. GRID SET : grid X Y\r\n"
+			"2. HOME     : home\r\n"
 
-        "   EXAMPLE  : grid 4 5\r\n"
+			"3. X SAVE   : xN -> s, x(N-1) -> s\r\n"
 
-        "2. HOME     : home\r\n"
+			"   EXAMPLE  : grid 4 5 -> x4, s, x3, s\r\n"
 
-        "3. X SAVE   : xN -> s, x(N-1) -> s\r\n"
+			"4. Y SAVE   : y1 -> s, y2 -> s\r\n"
 
-        "   EXAMPLE  : grid 4 5 -> x4, s, x3, s\r\n"
+			"5. IN SAVE  : in -> s\r\n"
+			"6. MOVE     : go X Y\r\n"
 
-        "4. Y SAVE   : y1 -> s, y2 -> s\r\n"
+			"7. STOP     : stop\r\n"
 
-        "5. IN SAVE  : in -> s\r\n"
-        "6. MOVE     : go X Y\r\n"
+			"8. CHECK    : status / show\r\n"
 
-        "7. STOP     : stop\r\n"
+			"   ROT JOG : rot c / rot r / rot l\r\n"
+			"----- ITEM (a~g) --------\r\n"
+			"9.  RANDOM  : start\r\n"
+			"10. MAP     : map\r\n"
+			"11. PICK    : a  (b c d e f g)\r\n"
+			"=========================\r\n");
 
-        "8. CHECK    : status / show\r\n"
+	/* ¡¢º” º¯∞£ «ˆ¿Á gridøÕ ∏≈Õ ªÛ≈¬ √‚∑¬ */
 
-        "   ROT JOG : rot c / rot r / rot l\r\n"
-        "----- ITEM (a~g) --------\r\n"
-        "9.  RANDOM  : start\r\n"
-        "10. MAP     : map\r\n"
-        "11. PICK    : a  (b c d e f g)\r\n"
-        "=========================\r\n");
-
-
-
-    /* Ï†ëÏÜç ÏàúÍ∞Ñ ÌòÑÏû¨ gridÏôÄ Î™®ÌÑ∞ ÏÉÅÌÉú Ï∂úÎ†• */
-
-    save_cmd(status_cmd);
+	save_cmd(status_cmd);
 
 }
 
-
-
-/* ===== Ï¥àÍ∏∞Ìôî ===== */
-
-
+/* ===== √ ±‚»≠ ===== */
 
 void tcp_init(void)
 
 {
 
-    net_init();
+	net_init();
 
+	line_len = 0;
 
-
-    line_len = 0;
-
-    greeted = 0;
+	greeted = 0;
 
 }
 
+/* ===== Ω««‡ ===== */
 
-
-/* ===== Ïã§Ìñâ ===== */
-
-
-
-/* ÏàòÏã† Î∞îÏù¥Ìä∏Î•º Ï§Ñ Îã®ÏúÑÎ°ú Ï°∞Î¶ΩÌï¥ save_cmdÎ°ú ÎÑòÍ∏¥Îã§ */
+/* ºˆΩ≈ πŸ¿Ã∆Æ∏¶ ¡Ÿ ¥‹¿ß∑Œ ¡∂∏≥«ÿ save_cmd∑Œ ≥—±‰¥Ÿ */
 
 static void feed(int32_t n)
 
 {
 
-    for (int32_t i = 0; i < n; i++) {
+	for (int32_t i = 0; i < n; i++) {
 
-        char c = (char)rx_buf[i];
+		char c = (char) rx_buf[i];
 
+		/* Enter */
 
+		if (c == '\r' || c == '\n') {
 
-        /* Enter */
+			if (line_len > 0) {
 
-        if (c == '\r' || c == '\n') {
+				line_buf[line_len] = '\0';
 
-            if (line_len > 0) {
+				save_cmd(line_buf);
 
-                line_buf[line_len] = '\0';
+				line_len = 0;
 
-                save_cmd(line_buf);
+			}
 
-                line_len = 0;
+		}
 
-            }
+		/* Backspace, Delete */
 
-        }
+		else if (c == 0x08 || c == 0x7F) {
 
-        /* Backspace, Delete */
+			if (line_len > 0)
+				line_len--;
 
-        else if (c == 0x08 || c == 0x7F) {
+		}
 
-            if (line_len > 0) line_len--;
+		/* ¿œπ› πÆ¿⁄ */
 
-        }
+		else if (line_len < BUF_SIZE) {
 
-        /* ÏùºÎ∞ò Î¨∏Ïûê */
+			line_buf[line_len++] = c;
 
-        else if (line_len < BUF_SIZE) {
+		}
 
-            line_buf[line_len++] = c;
-
-        }
-
-    }
+	}
 
 }
-
-
 
 void tcp_run(void)
 
 {
 
-    datasize_t received_size;
+	datasize_t received_size;
 
+	getsockopt(SOCK_NUM, SO_STATUS, &sock_status);
 
+	switch (sock_status) {
 
-    getsockopt(SOCK_NUM, SO_STATUS, &sock_status);
+	case SOCK_ESTABLISHED:
 
+		/* ªı ø¨∞·¿Ã∏È ªÁøÎπ˝¿ª «— π¯ √‚∑¬ */
 
+		if (!greeted) {
 
-    switch (sock_status) {
+			greeted = 1;
 
+			send_guide();
 
+		}
 
-    case SOCK_ESTABLISHED:
+		getsockopt(SOCK_NUM, SO_RECVBUF, &received_size);
 
-        /* ÏÉà Ïó∞Í≤∞Ïù¥Î©¥ ÏÇ¨Ïö©Î≤ïÏùÑ Ìïú Î≤à Ï∂úÎ†• */
+		if (received_size > 0) {
 
-        if (!greeted) {
+			int32_t n;
 
-            greeted = 1;
+			if (received_size > BUF_SIZE)
+				received_size = BUF_SIZE;
 
-            send_guide();
+			n = recv(SOCK_NUM, rx_buf, received_size);
 
-        }
+			if (n <= 0)
+				break;
 
+			feed(n);
 
+		}
 
-        getsockopt(SOCK_NUM, SO_RECVBUF, &received_size);
+		break;
 
+	case SOCK_CLOSE_WAIT:
 
+		disconnect(SOCK_NUM);
 
-        if (received_size > 0) {
+		line_len = 0;
 
-            int32_t n;
+		greeted = 0;
 
+		break;
 
+	case SOCK_INIT:
 
-            if (received_size > BUF_SIZE) received_size = BUF_SIZE;
+		listen(SOCK_NUM);
 
+		break;
 
+	case SOCK_CLOSED:
 
-            n = recv(SOCK_NUM, rx_buf, received_size);
+		socket(SOCK_NUM, Sn_MR_TCP4, LOCAL_PORT, SOCK_IO_NONBLOCK);
 
-            if (n <= 0) break;
+		line_len = 0;
 
+		greeted = 0;
 
+		break;
 
-            feed(n);
+	default:
 
-        }
+		break;
 
-        break;
-
-
-
-    case SOCK_CLOSE_WAIT:
-
-        disconnect(SOCK_NUM);
-
-        line_len = 0;
-
-        greeted = 0;
-
-        break;
-
-
-
-    case SOCK_INIT:
-
-        listen(SOCK_NUM);
-
-        break;
-
-
-
-    case SOCK_CLOSED:
-
-        socket(SOCK_NUM, Sn_MR_TCP4, LOCAL_PORT, SOCK_IO_NONBLOCK);
-
-        line_len = 0;
-
-        greeted = 0;
-
-        break;
-
-
-
-    default:
-
-        break;
-
-    }
+	}
 
 }

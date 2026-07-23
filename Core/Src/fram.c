@@ -38,4 +38,3 @@ void fram_write(uint16_t addr, void *buf, uint16_t len) {
 	HAL_SPI_Transmit(&hspi3, buf, len, 100);
 	CS_HIGH();
 }
-

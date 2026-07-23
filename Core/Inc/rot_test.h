@@ -3,11 +3,11 @@
 
 #include "main.h"
 
-/* ì „ì²´ ì‹¤í–‰ */
+/* ÀüÃ¼ ½ÇÇà */
 void rot_test_init(void);
 void rot_test_run(void);
 
-/* MKS íšŒì „ì¶•: UART5, RS4852, ID 2, Modbus-RTU */
+/* MKS È¸ÀüÃà: UART5, RS4852, ID 2, Modbus-RTU */
 int mks_init(void);
 int mks_check(void);
 int mks_pos(int *out);
