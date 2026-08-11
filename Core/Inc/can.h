@@ -2,18 +2,6 @@
 /**
   ******************************************************************************
   * @file    can.h
-  * @brief   This file contains all the function prototypes for
-  *          the can.c file
-  ******************************************************************************
-  * @attention
-  *
-  * Copyright (c) 2026 STMicroelectronics.
-  * All rights reserved.
-  *
-  * This software is licensed under terms that can be found in the LICENSE file
-  * in the root directory of this software component.
-  * If no LICENSE file comes with this software, it is provided AS-IS.
-  *
   ******************************************************************************
   */
 /* USER CODE END Header */
@@ -29,18 +17,30 @@ extern "C" {
 #include "main.h"
 
 /* USER CODE BEGIN Includes */
-
+#include "cmsis_os.h"
 /* USER CODE END Includes */
 
 extern CAN_HandleTypeDef hcan1;
 
 /* USER CODE BEGIN Private defines */
 
+typedef struct
+{
+    uint32_t Id;
+    uint8_t  Data[8];
+    uint8_t  Len;
+} CanFrame;
+
+extern osMessageQueueId_t CanQueue;
+
 /* USER CODE END Private defines */
 
 void MX_CAN1_Init(void);
 
 /* USER CODE BEGIN Prototypes */
+
+void CAN1_Start(void);
+void CAN1_Tx_Data(uint32_t id, uint8_t *data, uint8_t len);
 
 /* USER CODE END Prototypes */
 

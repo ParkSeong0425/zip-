@@ -8,10 +8,6 @@
 #include <stdint.h>
 
 #define MKS_REV     16384   /* 한 바퀴 도는 위치값. 0x4000 */
-#define ROT_RPM     1000
-#define ROT_C       0
-#define ROT_R       (-0x1AAB)  /* 약 -150도 */
-#define ROT_L       0x3555     /* 약 +300도 */
 
 /* 매뉴얼 Function 칸 */
 typedef enum {
@@ -42,9 +38,9 @@ int mks_write(uint8_t id, uint8_t code, uint64_t data, int n);
 int mks_read(uint8_t id, uint8_t code, int n, int *out);
 
 int mks_done(int axis);
-int mks_r(void);
-int mks_l(void);
-int mks_c(void);
+int mks_r(int rpm, int angle);
+int mks_l(int rpm, int angle);
+int mks_c(int rpm);
 int mks_init(void);
 int mks_move(int rpm, int axis);
 int mks_home(void);     /* 0x34 센서 -> F5 정지 -> 0x92 */

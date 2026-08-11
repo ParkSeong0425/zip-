@@ -39,7 +39,7 @@ Motor motorY = { &huart5, rs4852_GPIO_Port, rs4852_Pin};
 #define R_RUN           0x1100
 #define R_REG           0x1101
 #define R_BEGIN         0x1102
-#define R_TYPE          0x1104
+#define R_TYPE          0x1104  // 1: 절대모드 , 0 : 상대모드
 #define R_POS           0x110C
 #define R_SPEED         0x110E
 #define R_ACC           0x110F
@@ -253,6 +253,13 @@ int motor_init(Motor *m) {
 			&& set16(m, R_DI4L, 0)
 			&& set16(m, R_DI5L, 0)
 
+		 /* 중복 방지를 위해 DI 기능을 먼저 해제 */
+		    && set16(m, R_DI1, 0)
+		    && set16(m, R_DI2, 0)
+		    && set16(m, R_DI3, 0)
+		    && set16(m, R_DI4, 0)
+		    && set16(m, R_DI5, 0)
+
 			&& set16(m, R_DI1, 31)
 			&& set16(m, R_DI2, 1)
 			&& set16(m, R_DI3, 32)
@@ -264,6 +271,7 @@ int motor_init(Motor *m) {
 			&& set16(m, R_RUN, 0)
 			&& set16(m, R_REG, 1)
 			&& set16(m, R_BEGIN, 0)
+			&& set16(m, R_TYPE, 1)
 
 			&& set16(m, R_HOME_MODE,
 					m->uart == &huart5 ? 0 : 1) // 홈 갈때 방향 감지
@@ -271,6 +279,12 @@ int motor_init(Motor *m) {
 			&& set16(m, R_HOME_SLOW, 50)
 			&& set16(m, R_HOME_ACC, 200)
 
+			/* DI 중복 설정 확인 후 Servo ON */
+			&& read16(m, R_DI1, &v) && v == 31
+			&& read16(m, R_DI2, &v) && v == 1
+			&& read16(m, R_DI3, &v) && v == 32
+			&& read16(m, R_DI4, &v) && v == 28
+			&& read16(m, R_DI5, &v) && v == 34
 			&& set16(m, R_DI2L, 1);
 }
 
@@ -294,8 +308,8 @@ int motor_pos(Motor *m, int *out) {
 
 /* H11_04=1: 원점 기준 절대 목표 위치로 이동 */
 int motor_move(Motor *m, int rpm, int target) {
+
 	return set16(m, R_DI4L, 0)
-			&& set16(m, R_TYPE, 1)
 			&& write32(m, R_POS,
 					m->uart == &huart5 ? -target : target) // 위치 방향
 			&& set16(m, R_SPEED, rpm)

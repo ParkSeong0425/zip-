@@ -26,6 +26,8 @@
 /* Private includes ----------------------------------------------------------*/
 /* USER CODE BEGIN Includes */
 #include "net.h"
+#include "rfid.h"
+#include "can.h"
 /* USER CODE END Includes */
 
 /* Private typedef -----------------------------------------------------------*/
@@ -61,6 +63,13 @@ const osThreadAttr_t NET_Task_attributes = {
   .stack_size = 1024 * 4,
   .priority = (osPriority_t) osPriorityAboveNormal,
 };
+/* Definitions for RFID */
+osThreadId_t RFIDHandle;
+const osThreadAttr_t RFID_attributes = {
+  .name = "RFID",
+  .stack_size = 1024 * 4,
+  .priority = (osPriority_t) osPriorityNormal,
+};
 
 /* Private function prototypes -----------------------------------------------*/
 /* USER CODE BEGIN FunctionPrototypes */
@@ -69,6 +78,7 @@ const osThreadAttr_t NET_Task_attributes = {
 
 void StartDefaultTask(void *argument);
 void StartNET_Task(void *argument);
+void StartRFID_Task(void *argument);
 
 void MX_FREERTOS_Init(void); /* (MISRA C 2004 rule 8.1) */
 
@@ -96,6 +106,7 @@ void MX_FREERTOS_Init(void) {
 
   /* USER CODE BEGIN RTOS_QUEUES */
   /* add queues, ... */
+	CAN1_Start();
   /* USER CODE END RTOS_QUEUES */
 
   /* Create the thread(s) */
@@ -104,6 +115,9 @@ void MX_FREERTOS_Init(void) {
 
   /* creation of NET_Task */
   NET_TaskHandle = osThreadNew(StartNET_Task, NULL, &NET_Task_attributes);
+
+  /* creation of RFID */
+  RFIDHandle = osThreadNew(StartRFID_Task, NULL, &RFID_attributes);
 
   /* USER CODE BEGIN RTOS_THREADS */
   /* add threads, ... */
@@ -129,8 +143,7 @@ void StartDefaultTask(void *argument)
   /* Infinite loop */
   for(;;)
   {
-//      can_run();
-//      osDelay(10);
+      osDelay(10);
   }
   /* USER CODE END StartDefaultTask */
 }
@@ -148,6 +161,21 @@ void StartNET_Task(void *argument)
   /* Infinite loop */
 	TM_TaskRun(argument);
   /* USER CODE END StartNET_Task */
+}
+
+/* USER CODE BEGIN Header_StartRFID_Task */
+/**
+* @brief Function implementing the RFID thread.
+* @param argument: Not used
+* @retval None
+*/
+/* USER CODE END Header_StartRFID_Task */
+void StartRFID_Task(void *argument)
+{
+  /* USER CODE BEGIN StartRFID_Task */
+  /* Infinite loop */
+	 Rfid_Run();
+  /* USER CODE END StartRFID_Task */
 }
 
 /* Private application code --------------------------------------------------*/

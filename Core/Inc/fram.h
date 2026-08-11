@@ -9,13 +9,17 @@
 
 #include "main.h"
 
+typedef enum {
+	IN_X = 1, IN_Y, OUT_X, OUT_Y
+} Pos;
+
 void fram_read(uint16_t addr, void *buf, uint16_t len);
 void fram_write(uint16_t addr, void *buf, uint16_t len);
 
 int fram_load(void);
 
-int cfg_save(int rack, int nx, int ny);
-void cfg_load(int *rack, int *nx, int *ny);
+int cfg_save(int rack, int inx, int iny, int outx, int outy);
+void cfg_load(int *rack, int *inx, int *iny, int *outx, int *outy);
 
 int pos_count(int axis);
 int pos_save(int rack, int axis, int *v, int n);

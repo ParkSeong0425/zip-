@@ -13,6 +13,7 @@
  *   01I 원점  01S_1 정지  02C 상태  02N 렉/칸 수
  */
 #include "net.h"
+#include "rfid.h"
 #include "cli.h"
 #include "rot_test.h"
 #include "motor.h"
@@ -31,36 +32,20 @@
 #define PORT      2500
 #define OCHA      50      /* 이만큼도 안 움직이면 멈춘 것으로 본다 */
 #define START_MS  1000    /* 명령 걸고 이만큼은 무조건 기다린다 */
-#define MKS_ID    2       /* rot_test.c 의 ID */
 #define REV_PULSE 1000    /* 1회전 펄스 */
 #define REV_MM    160     /* 1회전 이동 mm. 폴리 지름 50.93 의 원주 */
+#define MAX_rpm   3000
 
 /* 공유기 대역에 맞춰 여기만 고친다 */
 #define IP        {172, 20, 0, 101}
 #define MASK      {255, 255, 255, 0}
 #define GATE      {0, 0, 0, 0}
 
-typedef enum {
-	STATE_W = 'W', STATE_R = 'R', STATE_I = 'I', STATE_P = 'P'
-} State;
-
-typedef enum {
-	STEP_STOP, STEP_XY, STEP_TILT, STEP_TURN, STEP_BACK, STEP_CENTER
-} Step;
-
-typedef struct {
-	int x, y, rpm;            /* X/Y 목표 mm 와 속도 */
-	int rot, center, rot_rpm; /* 틸트 목표와 정면과 속도 */
-	int dir;                  /* -1 입고 +1 출고 */
-	int wait, rx_wait;
-	int lastx, lasty;
-} Job;
-
 static State state = STATE_W;
 static Step step = STEP_STOP;
 static Job job;
 static uint32_t tick;
-static char line[64];
+static char line[128]; // 01FP값이 많아서 늘렸습니다
 static int line_len;
 
 /* 부팅 로그는 UART3 으로만 */
@@ -69,7 +54,7 @@ void print(const char *s) {
 }
 
 /* 명령 응답은 UART3 과 TCP 둘 다 */
-static void reply(const char *s) {
+void reply(const char *s) {
 	print(s);
 	if (getSn_SR(SOCK) == SOCK_ESTABLISHED)
 		send(SOCK, (uint8_t*) s, strlen(s));
@@ -139,21 +124,11 @@ static void net_init(void) {
 static int mm_to_pulse(int mm) {
 	return mm * REV_PULSE / REV_MM;
 }
-static int pulse_to_mm(int p) {
-	return p * REV_MM / REV_PULSE;
-}
+
 static int same(int a, int b) {
 	return a - b <= OCHA && b - a <= OCHA;
 }
 
-/* Y 모터는 방향이 반대라 읽은 값도 뒤집는다 */
-static int axis_pos(int axis, int *mm) {
-	int p;
-	if (!motor_pos(axis == 1 ? &motorX : &motorY, &p))
-		return 0;
-	*mm = pulse_to_mm(axis == 2 ? -p : p);
-	return 1;
-}
 
 /* ===== 동작 ===== */
 
@@ -163,203 +138,282 @@ static void next(Step s) {
 	tick = HAL_GetTick();
 }
 
-/* 직전에 읽은 위치와 비교해서 더 안 움직이면 도착으로 본다 */
+/* 개별 이동과 MI/PO의 목표 위치 확인 */
 static int xy_stop(void) {
-	int x = 0, y = 0, done;
-	motor_pos(&motorX, &x);
-	motor_pos(&motorY, &y);
-	done = same(x, job.lastx) && same(y, job.lasty);
-	job.lastx = x;
-	job.lasty = y;
-	return done;
+    int x = 0, y = 0, done;
+
+    motor_pos(&motorX, &x);
+    motor_pos(&motorY, &y);
+
+    /* X 개별 이동 */
+    if (job.dir == 2)
+        return same(x, mm_to_pulse(job.x));
+
+    /* Y 개별 이동 */
+    if (job.dir == 3)
+        return same(y, -mm_to_pulse(job.y));
+
+    /* MI/PO는 저장된 X/Y 위치 모두 확인 */
+    if (job.dir == -1 || job.dir == 1)
+        return same(x, mm_to_pulse(job.x))
+                && same(y, -mm_to_pulse(job.y));
+
+    /* 원점 이동은 기존처럼 정지 여부 확인 */
+    done = same(x, job.lastx) && same(y, job.lasty);
+    job.lastx = x;
+    job.lasty = y;
+
+    return done;
 }
 
 static int all_stop(void) {
 	int ok;
+	state = STATE_P;
+	next(STEP_STOP); // 이 순서로 해야 다음 동작을 실행하지 않는다
 	ok = motor_stop(&motorX);
 	ok = motor_stop(&motorY) && ok;
 	ok = mks_stop() && ok;
-	state = STATE_P;
-	next(STEP_STOP);
+
 	return ok;
 }
 
+// 모터가 홈으로 가서 원점센서 인식을 하면 각자 멈추고 그 지점을 원점으로 지정한다
 static int home(void) {
 	int ok;
+	state = STATE_I;
+	next(STEP_XY);
 	ok = motor_home_on(&motorX);
 	ok = motor_home_on(&motorY) && ok;
 	ok = mks_home() && ok;
-	state = STATE_I;
-	next(STEP_STOP);
+	job.center = 0;
+	job.dir = 0;
 	return ok;
 }
 
-/* "렉_열_단_rpm_틸트rpm_wait_rxwait". 위치는 FRAM 에서 꺼내 쓴다 */
+/* 렉_열_단_XY%_틸트%_시작지연ms_복귀대기10ms */
 static int go(char *s, int dir) {
-	int rack, col, row, l, r, c, rpm, ok;
-	job.wait = 0;
-	job.rx_wait = 0;
-	job.rot_rpm = 0;
-	if (sscanf(s, "%d_%d_%d_%d_%d_%d_%d", &rack, &col, &row, &job.rpm,
-			&job.rot_rpm, &job.wait, &job.rx_wait) < 4)
+	int rack, col, row, l, r, c, rpm;
+	int xy_rpm, rot_rpm, ok;
+
+	if (sscanf(s, "%d_%d_%d_%d_%d_%d_%d",
+			&rack, &col, &row, &xy_rpm, &rot_rpm,
+			&job.wait, &job.rx_wait) != 7)
 		return 0;
-	if (!pos_load(rack, 1, col, &job.x) || !pos_load(rack, 2, row, &job.y)
-			|| !rot_load(rack, &l, &r, &c, &rpm))
+
+	job.rpm = xy_rpm * MAX_rpm / 100;
+	job.rot_rpm = rot_rpm * MAX_rpm / 100;
+	job.rx_wait *= 10;
+
+	// fram에 저장되어있는 값들을 이용하여 MI인지 PO인지 분간
+	if (dir < 0) {
+		pos_load(rack, IN_X, col, &job.x);
+		pos_load(rack, IN_Y, row, &job.y);  /* 01MI */
+	} else {
+		pos_load(rack, OUT_X, col, &job.x);
+		pos_load(rack, OUT_Y, row, &job.y); /* 01PO */
+	}
+
+	if (!rot_load(rack, &l, &r, &c, &rpm))
 		return 0;
-	if (job.rot_rpm < 1)
-		job.rot_rpm = rpm;
+
 	job.dir = dir;
-	job.center = c;
-	job.rot = dir < 0 ? r : l;   /* 입고 R, 출고 L. 반대면 이 줄만 바꾼다 */
+	job.center = 0; // 복귀 위치 ( 나중에 원점 센서 하면 그곳이 원점 )
+	job.rot = -dir * r * MKS_REV / 360; // l,r 각도 값 들어가도록
 	ok = motor_move(&motorX, job.rpm, mm_to_pulse(job.x));
 	ok = motor_move(&motorY, job.rpm, mm_to_pulse(job.y)) && ok;
 	ok = mks_move(job.rot_rpm, job.center) && ok;
-	state = STATE_R;
-	next(STEP_XY);
+
+	if (ok) {
+		state = STATE_R;
+		next(STEP_XY);
+	}
+
 	return ok;
 }
 
-/* 자리 잡을 때 쓴다. "축_값_rpm" */
-static int jog(char *s) {
-	int axis, v, rpm;
-	if (sscanf(s, "%d_%d_%d", &axis, &v, &rpm) != 3)
-		return 0;
-	if (axis == 1)
-		return motor_move(&motorX, rpm, mm_to_pulse(v));
-	if (axis == 2)
-		return motor_move(&motorY, rpm, mm_to_pulse(v));
-	if (axis == 3)
-		return mks_move(rpm, v);
-	return 0;
-}
 
-/* 지금 자리를 저장한다. "렉_축_번호[_rpm]" */
-static int fs(char *s) {
-	int rack, axis, no, rpm = 0;
-	int p, v[2], l, r, c, old;
-	if (sscanf(s, "%d_%d_%d_%d", &rack, &axis, &no, &rpm) < 3)
-		return 0;
-	if (axis == 3) {
-		if (no < 1 || no > 3 || !mks_read(MKS_ID, CMD_AXIS, 6, &p)
-				|| !rot_load(rack, &l, &r, &c, &old))
-			return 0;
-		if (no == 1)
-			l = p;
-		else if (no == 2)
-			r = p;
-		else
-			c = p;
-		return rot_save(rack, l, r, c, rpm > 0 ? rpm : old);
-	}
-	if ((axis != 1 && axis != 2) || no < 1 || no > 2
-			|| !axis_pos(axis, &v[no - 1]))
-		return 0;
-	if (no == 2 && !pos_load(rack, axis, 1, &v[0]))
-		return 0;
-	return pos_save(rack, axis, v, no);
-}
+/* 01FS_1 조회 또는 01FS_1_S_X_Y 저장 */
+static void save_cfg(char *s) {
+    char b[32], type;
+    int rack, inx, iny, outx, outy;
 
-/* 저장값을 한 줄로 돌려준다. "렉_축" */
-static void fr(char *s) {
-	char b[256];
-	int rack, axis, no, v[4], len;
-	if (sscanf(s, "%d_%d", &rack, &axis) < 2) {
-		reply("01FR_ERR\r\n");
-		return;
-	}
-	len = snprintf(b, sizeof(b), "01FP_%d_%d", rack, axis);
-	if (axis == 3) {
-		if (!rot_load(rack, &v[0], &v[1], &v[2], &v[3])) {
-			reply("01FR_ERR\r\n");
-			return;
-		}
-		for (no = 0; no < 4; no++)
-			len += snprintf(b + len, sizeof(b) - len, "_%d", v[no]);
-	} else
-		for (no = 1; no <= pos_count(axis) && len < 230; no++) {
-			if (!pos_load(rack, axis, no, &v[0]))
-				break;
-			len += snprintf(b + len, sizeof(b) - len, "_%d", v[0]);
-		}
-	snprintf(b + len, sizeof(b) - len, "\r\n");
-	reply(b);
-}
-
-/* "렉수_X칸수_Y칸수" */
-static int save_cfg(char *s) {
-	int rack, nx, ny;
-	return sscanf(s, "%d_%d_%d", &rack, &nx, &ny) == 3
-			&& cfg_save(rack, nx, ny);
+    if (!strcmp(s, "1")) {
+        cfg_load(&rack, &inx, &iny, &outx, &outy);
+        snprintf(b, sizeof(b), "01FS_1_S_%d_%d_%d_%d\r\n",
+                inx, iny, outx, outy);
+        reply(b);
+    } else if (sscanf(s, "%d_%c_%d_%d_%d_%d",
+            &rack, &type, &inx, &iny, &outx, &outy) == 6
+            && rack == 1 && type == 'S')
+        ack("01FS", cfg_save(rack, inx, iny, outx, outy));
+    else
+        reply("01FS_ERR\r\n");
 }
 
 static void job_end(void) {
 	char b[32];
 	state = STATE_W;
 	next(STEP_STOP);
-	snprintf(b, sizeof(b), job.dir < 0 ? "01AI_%d_%d\r\n" : "01EO_%d_%d\r\n",
-			job.x, job.y);
+	if (job.dir == 0) {
+		motor_zero(&motorX);
+		motor_zero(&motorY);
+		mks_zero();
+		snprintf(b, sizeof(b), "01IE_1\r\n");
+	} else
+		snprintf(b, sizeof(b), job.dir < 0 ? "01AI_%d_%d\r\n" : "01EO_%d_%d\r\n",
+				job.x, job.y);
 	reply(b);
 }
 
-/* 10ms 마다 한 단계씩만 본다. 명령이 실패하면 다음 틱에 다시 건다 */
+/* 10ms마다 현재 동작 단계를 확인한다 */
 static void run(void) {
-	uint32_t dt = HAL_GetTick() - tick;
-	switch (step) {
-	case STEP_XY:
-		if (dt >= START_MS && xy_stop() && mks_done(job.center))
-			next(STEP_TILT);
-		break;
-	case STEP_TILT:
-		if (dt >= (uint32_t) job.wait && mks_move(job.rot_rpm, job.rot))
-			next(STEP_TURN);
-		break;
-	case STEP_TURN:
-		if (mks_done(job.rot))
-			next(STEP_BACK);
-		break;
-	case STEP_BACK:
-		if (dt >= (uint32_t) job.rx_wait && mks_move(job.rot_rpm, job.center))
-			next(STEP_CENTER);
-		break;
-	case STEP_CENTER:
-		if (mks_done(job.center))
-			job_end();
-		break;
-	default:
-		break;
-	}
+    uint32_t dt = HAL_GetTick() - tick;
+
+    switch (step) {
+    case STEP_XY:
+        if (dt >= START_MS && xy_stop()) {
+            if (job.dir == 2 || job.dir == 3) {
+                state = STATE_W;
+                next(STEP_STOP);
+                ack(job.dir == 2 ? "x" : "y", 1);
+            } else if (mks_done(job.center))
+                next(STEP_TILT);
+        }
+        break;
+
+    case STEP_TILT:
+        if (dt >= (uint32_t) job.wait
+                && mks_move(job.rot_rpm, job.rot))
+            next(STEP_TURN);
+        break;
+
+    case STEP_TURN:
+        if (mks_done(job.rot)) {
+            if (job.dir >= 4) {
+                state = STATE_W;
+                next(STEP_STOP);
+
+                if (job.dir == 4)
+                    ack("r", 1);
+                else if (job.dir == 5)
+                    ack("l", 1);
+                else
+                    ack("c", 1);
+            } else
+                next(STEP_BACK);
+        }
+        break;
+
+    case STEP_BACK:
+        if (dt >= (uint32_t) job.rx_wait
+                && mks_move(job.rot_rpm, job.center))
+            next(STEP_CENTER);
+        break;
+
+    case STEP_CENTER:
+        if (mks_done(job.center))
+            job_end();
+        break;
+
+    default:
+        break;
+    }
 }
 
 /* ===== 명령 ===== */
 
 /* TCP 와 UART3 CLI 가 같이 쓴다 */
-void net_cmd(char *s) {
-	char b[64];
-	int rack, nx, ny;
-	if (strncmp(s, "01MI_", 5) == 0)
+	void net_cmd(char *s) {
+	    char b[64];
+	    int v, rpm, rack, axis, n, pos[8];
+
+	if (step != STEP_STOP
+	        && strcmp(s, "01S_1")
+	        && strcmp(s, "02C")
+	        && strcmp(s, "02R")) {
+	    reply("동작 중\r\n");
+	    return;
+	}
+
+	if (strncmp(s, "01MI_", 5) == 0) // 입고 이동 명령
 		ack("01MI", go(s + 5, -1));
-	else if (strncmp(s, "01PO_", 5) == 0)
+	else if (strncmp(s, "01PO_", 5) == 0) // 이동 + 분배 명령
 		ack("01PO", go(s + 5, 1));
-	else if (strncmp(s, "01J_", 4) == 0)
-		ack("01J", jog(s + 4));
-	else if (strncmp(s, "01SAVE_", 7) == 0)
-		ack("01SAVE", save_cfg(s + 7));
-	else if (strncmp(s, "01FS_", 5) == 0)
-		ack("01FS", fs(s + 5));
-	else if (strncmp(s, "01FR_", 5) == 0)
-		fr(s + 5);
+	else if (sscanf(s, "x_%d_%d", &v, &rpm) == 2) {
+	    job.x = v; job.dir = 2;
+	    if (motor_move(&motorX, rpm, mm_to_pulse(v))) {
+	        state = STATE_R; next(STEP_XY);
+	    } else ack("x", 0);
+	}
+	else if (sscanf(s, "y_%d_%d", &v, &rpm) == 2) {
+	    job.y = v; job.dir = 3;
+	    if (motor_move(&motorY, rpm, mm_to_pulse(v))) {
+	        state = STATE_R; next(STEP_XY);
+	    } else ack("y", 0);
+	}
+	else if (sscanf(s, "r_%d_%d", &v, &rpm) == 2) {
+	    job.rot = -v * MKS_REV / 360; job.dir = 4;
+	    if (mks_r(rpm, v)) {
+	        state = STATE_R; next(STEP_TURN);
+	    } else ack("r", 0);
+	}
+	else if (sscanf(s, "l_%d_%d", &v, &rpm) == 2) {
+	    job.rot = v * MKS_REV / 360; job.dir = 5;
+	    if (mks_l(rpm, v)) {
+	        state = STATE_R; next(STEP_TURN);
+	    } else ack("l", 0);
+	}
+	else if (sscanf(s, "c_%d", &rpm) == 1) {
+	    job.rot = 0; job.dir = 6;
+	    if (mks_c(rpm)) {
+	        state = STATE_R; next(STEP_TURN);
+	    } else ack("c", 0);
+	}
+	/* 01FP_렉_종류_위치값... 저장 */
+	else if (strncmp(s, "01FP_", 5) == 0) {
+	    n = sscanf(s,
+	            "01FP_%d_%d_%d_%d_%d_%d_%d_%d_%d_%d",
+	            &rack, &axis,
+	            &pos[0], &pos[1], &pos[2], &pos[3],
+	            &pos[4], &pos[5], &pos[6], &pos[7]);
+
+	    if (n < 2)
+	        ack("01FP", 0);
+	    else if (axis == 3)
+	        ack("01FP", n == 6
+	                && rot_save(rack, pos[0], pos[1],
+	                        pos[2], pos[3]));
+
+	    else
+		    /*
+		     | 내부번호 | 의미   |
+	         | ----: | ----  |
+	         |     1 | 입고 X |
+	         |     2 | 입고 Y |
+	         |     3 | 출고 X |
+	         |     4 | 출고 Y |
+
+		     * 내부 번호에는 회전이 없으므로 프로토콜의 4와 5에서 1을 빼는 것입니다
+		     * 기존애 저장 할때는 입고x,y,틸트, 출고x,y 순인데
+		     * 01FP
+		     * */
+	        ack("01FP", pos_save(rack,
+	                axis < 3 ? axis : axis - 1,
+	                pos, n - 2));
+	}
+	else if (strncmp(s, "01FS_", 5) == 0) // 렉 단 열 저장 명령
+	    save_cfg(s + 5);
 	else if (strcmp(s, "01I") == 0)
 		ack("01I", home());
-	else if (strcmp(s, "01S_1") == 0)
+	else if (strcmp(s, "01S_1") == 0) // 동작 정지 명령
 		ack("01S", all_stop());
 	else if (strcmp(s, "02C") == 0) {
 		snprintf(b, sizeof(b), "01-S_1_%c&S\r\n", (char) state);
 		reply(b);
-	} else if (strcmp(s, "02N") == 0) {
-		cfg_load(&rack, &nx, &ny);
-		snprintf(b, sizeof(b), "02N_%d_%d_%d\r\n", rack, nx, ny);
-		reply(b);
-	} else
+	}
+	else if (strcmp(s, "02R") == 0)
+		Rfid_Request();
+	else
 		reply("에러\r\n");
 }
 
@@ -409,9 +463,13 @@ void TM_TaskRun(void *arg) {
 	print(mks_init() ? "mks ready\r\n" : "mks init ERR\r\n");
 	cli_start();
 	for (;;) {
-		run();
+		if (rfid_check) {
+			rfid_check = 0;
+			all_stop();
+		}
 		serve();
 		cli_poll();
+		run();
 		vTaskDelay(pdMS_TO_TICKS(10));
 	}
 }

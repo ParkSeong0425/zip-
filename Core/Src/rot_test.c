@@ -36,8 +36,8 @@ extern UART_HandleTypeDef huart5;
 #define HM_LIMIT      0    /* 홈 후 축 잠금 유지 */
 
 /* 6.1 / 6.9 */
-#define ACC         150     /* 1rpm 당 (256-ACC)*50us */
-#define DEC         200     /* 정지 감속. 0 이면 즉시 정지 */
+#define ACC 236     /* 3000rpm까지 약 3초 */
+#define DEC 236     /* 정지할 때도 약 3초 감속 */
 #define Ocha    	200     /* 도착 판정 오차 */
 
 #define DE_ON_US    20      /* 방향핀 송신 전환 후 대기 */
@@ -242,14 +242,14 @@ int mks_stop(void) {
 }
 
 
-int mks_r(void) {
-	return mks_move(ROT_RPM, ROT_R);
+int mks_r(int rpm, int angle) {
+	return mks_move(rpm, -angle * MKS_REV / 360);
 }
 
-int mks_l(void) {
-	return mks_move(ROT_RPM, ROT_L);
+int mks_l(int rpm, int angle) {
+	return mks_move(rpm, angle * MKS_REV / 360);
 }
 
-int mks_c(void) {
-	return mks_move(ROT_RPM, ROT_C);
+int mks_c(int rpm) {
+	return mks_move(rpm, 0);
 }

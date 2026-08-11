@@ -35,9 +35,6 @@ static int now_col, now_dan;
 
 static int seeded;
 
-static void reply(const char *s) {
-	tcp_reply(s);
-}
 
 static int ok_code(char c) {
 	return c >= FIRST && c <= LAST;

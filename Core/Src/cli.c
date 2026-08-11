@@ -13,26 +13,25 @@
 #include "usart.h"
 #include <string.h>
 
-#define LINE_N 64
+#define LINE_N 128
 #define BS     8
 #define DEL    127
 
 static char line[LINE_N];
 static int line_len;
-static uint8_t last_cr;
+
 
 /* UART3 문자열 출력 */
 static void put(const char *s) {
 	HAL_UART_Transmit(&huart3, (uint8_t*) s, strlen(s), 100);
 }
 
-/* UART3 에서 받은 글자가 있으면 1 */
+/* UART3에서 받은 글자가 있으면 1 */
 static int uart_get(uint8_t *c) {
-	if (__HAL_UART_GET_FLAG(&huart3, UART_FLAG_ORE) != RESET)
-		__HAL_UART_CLEAR_OREFLAG(&huart3);
 	if (__HAL_UART_GET_FLAG(&huart3, UART_FLAG_RXNE) == RESET)
 		return 0;
-	*c = (uint8_t) huart3.Instance->DR;
+
+	*c = (uint8_t)huart3.Instance->DR;
 	return 1;
 }
 
@@ -43,16 +42,21 @@ int cli_key(void) {
 }
 
 /* 명령 목록 */
+/* 현재 사용 가능한 명령 목록 */
 static void help(void) {
-	put("01SAVE N X Y        : 렉 수 / X 칸 수 / Y 칸 수 정하기\r\n");
-	put("01J 축 값 rpm       : 손으로 이동. 1=X mm  2=Y mm  3=틸트 각\r\n");
-	put("01FS 렉 축 번호 rpm : 지금 자리 저장\r\n");
-	put("                      X/Y 번호 1=첫칸 2=둘째칸, 틸트 1=L 2=R 3=C\r\n");
-	put("01FR 렉 축          : 저장값 보기\r\n");
-	put("01MI 렉 열 단 rpm   : 입고\r\n");
-	put("01PO 렉 열 단 rpm   : 출고\r\n");
-	put("01I / 01S 1         : 원점 / 정지\r\n");
-	put("02C / 02N           : 상태 / 렉·칸 수\r\n");
+	put("01FS 1                  : 설정값 조회\r\n");
+	put("01FS 1 S IX IY OX OY    : 입고/출고 칸 수 저장\r\n");
+	put("x 위치 rpm              : X축 수동 이동\r\n");
+	put("y 위치 rpm              : Y축 수동 이동\r\n");
+	put("r 각도 rpm              : 오른쪽 수동 회전\r\n");
+	put("l 각도 rpm              : 왼쪽 수동 회전\r\n");
+	put("c rpm                   : 회전축 0도로 이동\r\n");
+	put("01MI 렉 열 단 XY% ROT% 시작ms 복귀10ms : 입고\r\n");
+	put("01PO 렉 열 단 XY% ROT% 시작ms 복귀10ms : 출고\r\n");
+	put("01I                     : 원점 이동\r\n");
+	put("01S_1                   : 전체 정지\r\n");
+	put("02C                     : 동작 상태 확인\r\n");
+	put("02R                     : RFID 상태 요청\r\n");
 }
 
 /* 띄어쓰기를 밑줄로 바꿔 TCP 와 같은 형식으로 만든다 */
@@ -73,30 +77,27 @@ void cli_exec(char *s) {
 }
 
 /* 한 글자 입력 처리 */
+/* 한 글자 입력 처리 */
 static void cli_char(uint8_t c) {
-	if (c == '\n' && last_cr) {
-		last_cr = 0;
-		return;
-	}
 	if (c == '\r' || c == '\n') {
-		last_cr = (c == '\r');
+		if (!line_len)
+			return;
+
 		put("\r\n");
-		if (line_len) {
-			line[line_len] = 0;
-			line_len = 0;
-			cli_exec(line);
-		}
+		line[line_len] = 0;
+		line_len = 0;
+		cli_exec(line);
 		put("> ");
-	} else if (c == BS || c == DEL) {
-		last_cr = 0;
+	}
+	else if (c == BS || c == DEL) {
 		if (line_len) {
 			line_len--;
 			put("\b \b");
 		}
-	} else if (c >= ' ' && c < DEL && line_len < LINE_N - 1) {
-		last_cr = 0;
-		line[line_len++] = (char) c;
-		HAL_UART_Transmit(&huart3, &c, 1, 100);   /* 에코 */
+	}
+	else if (c >= ' ' && c < DEL && line_len < LINE_N - 1) {
+		line[line_len++] = (char)c;
+		HAL_UART_Transmit(&huart3, &c, 1, 100);
 	}
 }
 
@@ -110,6 +111,5 @@ void cli_poll(void) {
 /* 부팅 로그 뒤에 한 번 부른다 */
 void cli_start(void) {
 	line_len = 0;
-	last_cr = 0;
 	put("\r\nCLI ready. help 치면 명령 목록\r\n> ");
 }
