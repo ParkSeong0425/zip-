@@ -7,6 +7,7 @@
 #include "main.h"
 #include <stdint.h>
 
+#define ROT_GEAR  20      /* mks모터 웜기어에 들어있는 감속비 20:1  */
 #define MKS_REV     16384   /* 한 바퀴 도는 위치값. 0x4000 */
 
 /* 매뉴얼 Function 칸 */

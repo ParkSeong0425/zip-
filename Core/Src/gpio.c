@@ -55,11 +55,10 @@ void MX_GPIO_Init(void)
   __HAL_RCC_GPIOB_CLK_ENABLE();
 
   /*Configure GPIO pin Output Level */
-  HAL_GPIO_WritePin(GPIOE, F4_Pin|F1_Pin|F2_Pin|F3_Pin
-                          |W610_RST_Pin, GPIO_PIN_SET);
+  HAL_GPIO_WritePin(MOTOR_ON_GPIO_Port, MOTOR_ON_Pin, GPIO_PIN_SET);
 
   /*Configure GPIO pin Output Level */
-  HAL_GPIO_WritePin(GPIOF, MOTOR_ON_Pin|MOTOR_START_Pin|STOP_Pin, GPIO_PIN_RESET);
+  HAL_GPIO_WritePin(GPIOF, MOTOR_START_Pin|STOP_Pin, GPIO_PIN_RESET);
 
   /*Configure GPIO pin Output Level */
   HAL_GPIO_WritePin(LAMP_GREEN_GPIO_Port, LAMP_GREEN_Pin, GPIO_PIN_SET);
@@ -73,13 +72,13 @@ void MX_GPIO_Init(void)
   /*Configure GPIO pin Output Level */
   HAL_GPIO_WritePin(rs485_GPIO_Port, rs485_Pin, GPIO_PIN_RESET);
 
-  /*Configure GPIO pins : F4_Pin F1_Pin F2_Pin F3_Pin
-                           W610_RST_Pin */
-  GPIO_InitStruct.Pin = F4_Pin|F1_Pin|F2_Pin|F3_Pin
-                          |W610_RST_Pin;
-  GPIO_InitStruct.Mode = GPIO_MODE_OUTPUT_PP;
-  GPIO_InitStruct.Pull = GPIO_NOPULL;
-  GPIO_InitStruct.Speed = GPIO_SPEED_FREQ_LOW;
+  /*Configure GPIO pin Output Level */
+  HAL_GPIO_WritePin(W610_RST_GPIO_Port, W610_RST_Pin, GPIO_PIN_SET);
+
+  /*Configure GPIO pins : F4_Pin F1_Pin F2_Pin F3_Pin */
+  GPIO_InitStruct.Pin = F4_Pin|F1_Pin|F2_Pin|F3_Pin;
+  GPIO_InitStruct.Mode = GPIO_MODE_INPUT;
+  GPIO_InitStruct.Pull = GPIO_PULLDOWN;
   HAL_GPIO_Init(GPIOE, &GPIO_InitStruct);
 
   /*Configure GPIO pins : MOTOR_ON_Pin MOTOR_START_Pin STOP_Pin */
@@ -91,7 +90,7 @@ void MX_GPIO_Init(void)
 
   /*Configure GPIO pin : ESTOP_btn_Pin */
   GPIO_InitStruct.Pin = ESTOP_btn_Pin;
-  GPIO_InitStruct.Mode = GPIO_MODE_EVT_RISING;
+  GPIO_InitStruct.Mode = GPIO_MODE_IT_RISING_FALLING;
   GPIO_InitStruct.Pull = GPIO_NOPULL;
   HAL_GPIO_Init(ESTOP_btn_GPIO_Port, &GPIO_InitStruct);
 
@@ -133,6 +132,13 @@ void MX_GPIO_Init(void)
   GPIO_InitStruct.Pull = GPIO_NOPULL;
   GPIO_InitStruct.Speed = GPIO_SPEED_FREQ_LOW;
   HAL_GPIO_Init(rs4852_GPIO_Port, &GPIO_InitStruct);
+
+  /*Configure GPIO pin : W610_RST_Pin */
+  GPIO_InitStruct.Pin = W610_RST_Pin;
+  GPIO_InitStruct.Mode = GPIO_MODE_OUTPUT_PP;
+  GPIO_InitStruct.Pull = GPIO_NOPULL;
+  GPIO_InitStruct.Speed = GPIO_SPEED_FREQ_LOW;
+  HAL_GPIO_Init(W610_RST_GPIO_Port, &GPIO_InitStruct);
 
   /* EXTI interrupt init*/
   HAL_NVIC_SetPriority(EXTI1_IRQn, 5, 0);

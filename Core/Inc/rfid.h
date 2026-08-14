@@ -8,8 +8,7 @@
 #include "main.h"
 #include "cmsis_os.h"
 
-extern uint8_t RfidUID[4];
-extern uint8_t RfidOn;
+extern volatile int card_ok;
 
 void Rfid_Run(void);
 void Rfid_Request(void);

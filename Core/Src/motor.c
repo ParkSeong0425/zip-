@@ -35,6 +35,7 @@ Motor motorY = { &huart5, rs4852_GPIO_Port, rs4852_Pin};
 #define R_HOME_FAST     0x0520  /* H05_32 */
 #define R_HOME_SLOW     0x0521  /* H05_33 */
 #define R_HOME_ACC      0x0522  /* H05_34 */
+#define R_HOME_OFF      0x0524  /* H05_36 */
 
 #define R_RUN           0x1100
 #define R_REG           0x1101
@@ -275,9 +276,10 @@ int motor_init(Motor *m) {
 
 			&& set16(m, R_HOME_MODE,
 					m->uart == &huart5 ? 0 : 1) // 홈 갈때 방향 감지
-			&& set16(m, R_HOME_FAST, 150)
-			&& set16(m, R_HOME_SLOW, 50)
-			&& set16(m, R_HOME_ACC, 200)
+			&& set16(m, R_HOME_FAST, 350)
+			&& set16(m, R_HOME_SLOW, 100)
+			&& set16(m, R_HOME_ACC, 1000) // 홈으로 갈때 가감속
+			&& write32(m, R_HOME_OFF, 0) // 전기,기계적 원점 확인하고 원점으로 해주는 데이터
 
 			/* DI 중복 설정 확인 후 Servo ON */
 			&& read16(m, R_DI1, &v) && v == 31
@@ -290,11 +292,9 @@ int motor_init(Motor *m) {
 
 /* ===== 동작 ===== */
 
-/* DI3L을 0→1로 바꿔 init에서 설정한 방향으로 원점 복귀 시작 */
+/* 센서를 찾아 원점복귀 */
 int motor_home_on(Motor *m) {
-	return set16(m, R_DI3L, 0)
-			&& set16(m, R_HOME_SEL, 1)
-			&& set16(m, R_DI3L, 1);
+    return set16(m, R_HOME_SEL, 4);
 }
 /* 현재 위치를 소프트웨어 0으로 설정 */
 int motor_zero(Motor *m) {
@@ -325,3 +325,7 @@ int motor_stop(Motor *m) {
 	return set16(m, R_HOME_SEL, 0) && ok;
 }
 
+/* AIM 모터 비상정지 설정/해제 */
+int motor_estop(Motor *m, int on) {
+    return set16(m, R_DI5L, on);
+}

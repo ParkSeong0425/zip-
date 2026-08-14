@@ -18,7 +18,30 @@ volatile int estop;
 static volatile int start_req;
 static volatile int pause_req;
 static volatile int estop_req;
+static volatile int full;  // 전부 1일때 만재 나느 상황
 
+/* F1~F4 현재 만재 입력을 비트로 읽는다 */
+static int full_now(void) {
+	return (HAL_GPIO_ReadPin(F1_GPIO_Port, F1_Pin) ? 0 : 1)
+			| (HAL_GPIO_ReadPin(F2_GPIO_Port, F2_Pin) ? 0 : 2)
+			| (HAL_GPIO_ReadPin(F3_GPIO_Port, F3_Pin) ? 0 : 4)
+			| (HAL_GPIO_ReadPin(F4_GPIO_Port, F4_Pin) ? 0 : 8);
+}
+
+/* 한 번 감지된 만재는 해제 전까지 유지한다 */
+int full_get(void) {
+	full |= full_now();
+	return full;
+}
+
+/* 센서가 다 0일 때만 해제한다 */
+int full_clear(void) {
+	if (full_now())
+		return 0;
+
+	full = 0;
+	return 1;
+}
 /* 대기 상태 램프 */
 static void lamp_idle(void) {
 	HAL_GPIO_WritePin(STOP_GPIO_Port, STOP_Pin, GPIO_PIN_SET);
@@ -56,20 +79,20 @@ void button_init(void) {
 	run = 0;
 	pause = 0;
 
-	estop = HAL_GPIO_ReadPin(
-	ESTOP_btn_GPIO_Port,
-	ESTOP_btn_Pin);
+	estop = HAL_GPIO_ReadPin(ESTOP_btn_GPIO_Port, ESTOP_btn_Pin);
 
-	start_req = 0;
-	pause_req = 0;
-	estop_req = 0;
+	start_req = 0; // 시작 버튼
+	pause_req = 0; // 일시정지 버튼
+	estop_req = estop; // 전원 투입 때 눌려 있으면 정지 요청
+	full = 0;
 
 	/* MOTOR_ON은 Active High */
-	HAL_GPIO_WritePin(
-	MOTOR_ON_GPIO_Port,
-	MOTOR_ON_Pin, GPIO_PIN_SET);
+	HAL_GPIO_WritePin( MOTOR_ON_GPIO_Port, MOTOR_ON_Pin, GPIO_PIN_SET);
 
-	lamp_idle();
+	if (estop)
+		lamp_estop();
+	else
+		lamp_idle();
 }
 
 /* GPIO 외부 인터럽트 */
@@ -90,18 +113,17 @@ void HAL_GPIO_EXTI_Callback(uint16_t pin) {
 		return;
 	}
 
-	/* STOP 버튼: 일시정지 */
+	/* STOP 버튼: 요청만 세운다 */
 	if (pin == STOP_btn_Pin) {
 		if (now - last[1] < DEBOUNCE)
 			return;
 
 		last[1] = now;
 
-		pause = 1;
-		run = 0;
 		pause_req = 1;
 
-		lamp_pause();
+		/* 눌린 것은 바로 알려준다 */
+		HAL_GPIO_WritePin(STOP_GPIO_Port, STOP_Pin, GPIO_PIN_RESET);
 		return;
 	}
 
@@ -116,10 +138,11 @@ void HAL_GPIO_EXTI_Callback(uint16_t pin) {
 		ESTOP_btn_GPIO_Port,
 		ESTOP_btn_Pin);
 
+		estop_req = 1;
+
 		if (estop) {
 			run = 0;
 			pause = 0;
-			estop_req = 1;
 
 			lamp_estop();
 		} else {
@@ -128,40 +151,41 @@ void HAL_GPIO_EXTI_Callback(uint16_t pin) {
 	}
 }
 
-/* 블로킹 홈 동작 중 STOP/ESTOP 확인 */
+/* 블로킹 동작 중 확인. 하던 명령은 끝내니 ESTOP 만 끊는다 */
 int button_stop_requested(void) {
-	return pause || estop;
+	return estop;
 }
 
 /* 버튼 요청 처리 */
 void button_run(void) {
-	/* 비상정지 */
+	full |= full_now();   /* 만재 센서 순간 감지 */
+
+	/* 비상정지 및 해제 */
 	if (estop_req) {
 		estop_req = 0;
-
-		item_auto_stop();
-		save_abort();
-
-		print("ESTOP\r\n");
-		return;
-	}
-
-	if (estop)
-		return;
-
-	/* 자동운전이 끝났으면 대기 상태로 변경 */
-	if (run && !item_auto_on() && !save_busy()) {
-		run = 0;
-		lamp_idle();
-	}
-
-	/* 일시정지 요청 */
-	if (pause_req) {
 		pause_req = 0;
 
-		if (save_pause())
-			print("BUTTON PAUSE\r\n");
+		motor_estop(&motorX, estop);
+		motor_estop(&motorY, estop);
 
+		if (estop) {
+			net_cmd("01S_1");
+			print("ESTOP\r\n");
+		} else {
+			print("ESTOP CLEAR\r\n");
+			net_cmd("01I");
+		}
+		return;
+	}
+
+	/* 일시정지 */
+	if (pause_req) {
+		pause_req = 0;
+		pause = 1;
+		run = 0;
+
+		lamp_pause();
+		print("01S_1\r\n");
 		return;
 	}
 
@@ -169,43 +193,14 @@ void button_run(void) {
 		return;
 
 	start_req = 0;
+	full_clear();         /* 시작 버튼에서 만재 해제 */
 
-	/* 일시정지 상태에서 PG1을 누르면 이어서 실행 */
-	if (pause || save_paused()) {
-		if (save_resume()) {
-			pause = 0;
-			run = 1;
-
-			lamp_run();
-			print("BUTTON RESUME\r\n");
-			return;
-		}
-
-		/* 홈 도중 정지한 경우 홈부터 다시 시작 */
+	/* 일시정지 해제 */
+	if (pause) {
 		pause = 0;
+		run = 1;
+
+		lamp_run();
+		print("START\r\n");
 	}
-
-	/* 준비가 안 됐으면 ROT, X, Y 홈부터 실행 */
-	if (!save_ready() && !save_home()) {
-		run = 0;
-
-		lamp_pause();
-		print("BUTTON HOME FAIL\r\n");
-		return;
-	}
-
-	/* TCP auto 명령과 같은 자동 랜덤 운전 시작 */
-	if (!item_auto_start()) {
-		run = 0;
-
-		lamp_pause();
-		print("BUTTON AUTO FAIL\r\n");
-		return;
-	}
-
-	pause = 0;
-	run = 1;
-
-	lamp_run();
-	print("BUTTON AUTO START\r\n");
 }

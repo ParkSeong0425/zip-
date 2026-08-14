@@ -1,7 +1,7 @@
 /*
  * m_motor.c  -  MKS SERVO57D_RS485.  매뉴얼 V1.0.6
  *
- * UART4 57600 8N1, 방향핀 rs485_Pin. 모터 주소는 ids[] 에.
+ * UART5 57600 8N1, 방향핀 rs485_Pin. 모터 주소는 ids[] 에.
  * 레지스터는 mks_put / mks_get 둘로 다 쓴다. n 은 Data 칸 바이트 수.
  *   mks_put(id, CMD_CURRENT, 3500, 2)   쪼개는 건 put 이 한다
  *   mks_put(id, CMD_ZERO, 0, 0)         Data 없음
@@ -36,9 +36,9 @@ extern UART_HandleTypeDef huart5;
 #define HM_LIMIT      0    /* 홈 후 축 잠금 유지 */
 
 /* 6.1 / 6.9 */
-#define ACC 236     /* 3000rpm까지 약 3초 */
-#define DEC 236     /* 정지할 때도 약 3초 감속 */
-#define Ocha    	200     /* 도착 판정 오차 */
+#define ACC 180            /* 3000rpm까지 값이 크면 더 빠르게 반응  */
+#define DEC 180           /* 정지할 때도 마찬가지  */
+#define Ocha    	2000     /* 도착 판정 오차 */
 
 #define DE_ON_US    20      /* 방향핀 송신 전환 후 대기 */
 #define RX_WAIT     500     /* 응답 대기 */
@@ -243,11 +243,13 @@ int mks_stop(void) {
 
 
 int mks_r(int rpm, int angle) {
-	return mks_move(rpm, -angle * MKS_REV / 360);
+    return mks_move(rpm,
+            -angle * MKS_REV * ROT_GEAR / 360);
 }
 
 int mks_l(int rpm, int angle) {
-	return mks_move(rpm, angle * MKS_REV / 360);
+    return mks_move(rpm,
+            angle * MKS_REV * ROT_GEAR / 360);
 }
 
 int mks_c(int rpm) {
