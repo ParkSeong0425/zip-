@@ -78,7 +78,7 @@ void MX_GPIO_Init(void)
   /*Configure GPIO pins : F4_Pin F1_Pin F2_Pin F3_Pin */
   GPIO_InitStruct.Pin = F4_Pin|F1_Pin|F2_Pin|F3_Pin;
   GPIO_InitStruct.Mode = GPIO_MODE_INPUT;
-  GPIO_InitStruct.Pull = GPIO_PULLDOWN;
+  GPIO_InitStruct.Pull = GPIO_PULLUP;
   HAL_GPIO_Init(GPIOE, &GPIO_InitStruct);
 
   /*Configure GPIO pins : MOTOR_ON_Pin MOTOR_START_Pin STOP_Pin */

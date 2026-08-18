@@ -365,11 +365,10 @@ static void job_run(void) {
 		if (wait >= (uint32_t) move.tilt_delay
 				&& mks_move(move.tilt_speed, move.tilt))
 			next(STEP_TURN);
-	 else if (wait > 10000) {
+		else if (wait > 10000) {
 			all_stop();
 			nak("turn_fail");
 		}
-		break;
 		break;
 	case STEP_TURN:
 		if (!mks_done(move.tilt))        /* 각도 도착을 기다린다 */

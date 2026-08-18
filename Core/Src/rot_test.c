@@ -36,9 +36,9 @@ extern UART_HandleTypeDef huart5;
 #define HM_LIMIT      0    /* 홈 후 축 잠금 유지 */
 
 /* 6.1 / 6.9 */
-#define ACC 180            /* 3000rpm까지 값이 크면 더 빠르게 반응  */
-#define DEC 180           /* 정지할 때도 마찬가지  */
-#define Ocha    	2000     /* 도착 판정 오차 */
+#define ACC  180                     /* 3000rpm까지 값이 크면 더 빠르게 반응  */
+#define DEC  180                     /* 정지할 때도 마찬가지 */
+#define Ocha 455                     /* 오차 0.5도 */
 
 #define DE_ON_US    20      /* 방향핀 송신 전환 후 대기 */
 #define RX_WAIT     500     /* 응답 대기 */
