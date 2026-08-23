@@ -1,0 +1,102 @@
+<?xml version="1.0" encoding="utf-8"?>
+<Settings xmlns:xsd="http://www.w3.org/2001/XMLSchema" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance">
+  <SettingsName>YAT Command Page Definition</SettingsName>
+  <SettingsVersion>1.1.0</SettingsVersion>
+  <ProductVersion>2.8.2</ProductVersion>
+  <Warning>Modifying structure and/or content may cause undefined behavior!</Warning>
+  <Mark>
+    <TimeStamp>2026-08-23T22:30:42.8646961+09:00</TimeStamp>
+    <UserName>swpark</UserName>
+  </Mark>
+  <Page>
+    <PageName>Page 1</PageName>
+    <Commands>
+      <IsDefined>true</IsDefined>
+      <Description>1-1 입고 </Description>
+      <CommandLines>\h(02)01MI_1_1_1_030_030_500_050\h(03)</CommandLines>
+      <DefaultRadix>String</DefaultRadix>
+      <IsFilePath>false</IsFilePath>
+      <FilePath />
+    </Commands>
+    <Commands>
+      <IsDefined>true</IsDefined>
+      <Description>2-2 입고 </Description>
+      <CommandLines>\h(02)01MI_1_2_2_030_030_500_050\h(03)</CommandLines>
+      <DefaultRadix>String</DefaultRadix>
+      <IsFilePath>false</IsFilePath>
+      <FilePath />
+    </Commands>
+    <Commands>
+      <IsDefined>true</IsDefined>
+      <Description>3-3 입고 </Description>
+      <CommandLines>\h(02)01MI_1_3_3_030_030_500_050\h(03)</CommandLines>
+      <DefaultRadix>String</DefaultRadix>
+      <IsFilePath>false</IsFilePath>
+      <FilePath />
+    </Commands>
+    <Commands>
+      <IsDefined>true</IsDefined>
+      <Description>4-4 입고 </Description>
+      <CommandLines>\h(02)01MI_1_4_4_030_030_500_050\h(03)</CommandLines>
+      <DefaultRadix>String</DefaultRadix>
+      <IsFilePath>false</IsFilePath>
+      <FilePath />
+    </Commands>
+    <Commands>
+      <IsDefined>false</IsDefined>
+      <Description />
+      <CommandLines />
+      <DefaultRadix>String</DefaultRadix>
+      <IsFilePath>false</IsFilePath>
+      <FilePath />
+    </Commands>
+    <Commands>
+      <IsDefined>true</IsDefined>
+      <Description>1-1 출고 분배 </Description>
+      <CommandLines>\h(02)01PO_1_1_1_030_030_500_050\h(03)</CommandLines>
+      <DefaultRadix>String</DefaultRadix>
+      <IsFilePath>false</IsFilePath>
+      <FilePath />
+    </Commands>
+    <Commands>
+      <IsDefined>true</IsDefined>
+      <Description>2-2 출고 분배 </Description>
+      <CommandLines>\h(02)01PO_1_2_2_030_030_500_050\h(03)</CommandLines>
+      <DefaultRadix>String</DefaultRadix>
+      <IsFilePath>false</IsFilePath>
+      <FilePath />
+    </Commands>
+    <Commands>
+      <IsDefined>true</IsDefined>
+      <Description>3-3 출고 </Description>
+      <CommandLines>\h(02)01MO_1_3_3_030_030_500_050\h(03)</CommandLines>
+      <DefaultRadix>String</DefaultRadix>
+      <IsFilePath>false</IsFilePath>
+      <FilePath />
+    </Commands>
+    <Commands>
+      <IsDefined>true</IsDefined>
+      <Description>틸트 왼쪽 </Description>
+      <CommandLines>\h(02)l_10_050\h(03)</CommandLines>
+      <DefaultRadix>String</DefaultRadix>
+      <IsFilePath>false</IsFilePath>
+      <FilePath />
+    </Commands>
+    <Commands>
+      <IsDefined>true</IsDefined>
+      <Description>상태체크 </Description>
+      <CommandLines>\h(02)02C\h(03)</CommandLines>
+      <DefaultRadix>String</DefaultRadix>
+      <IsFilePath>false</IsFilePath>
+      <FilePath />
+    </Commands>
+    <Commands>
+      <IsDefined>true</IsDefined>
+      <Description>RFID</Description>
+      <CommandLines>\h(02)02R\h(03)</CommandLines>
+      <DefaultRadix>String</DefaultRadix>
+      <IsFilePath>false</IsFilePath>
+      <FilePath />
+    </Commands>
+  </Page>
+</Settings>
