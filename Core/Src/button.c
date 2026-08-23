@@ -19,6 +19,7 @@ static volatile int start_req;
 static volatile int pause_req;
 static volatile int estop_req;
 static volatile int full;  // 전부 1일때 만재 나느 상황
+static volatile int full_pause;  // 만재로 멈춰 있으면 1
 
 /* F1~F4 현재 만재 입력을 비트로 읽는다 */
 static int full_now(void) {
@@ -28,19 +29,22 @@ static int full_now(void) {
 			| (HAL_GPIO_ReadPin(F4_GPIO_Port, F4_Pin) ? 0 : 8);
 }
 
+/* 지금 센서 값만 본다. 걸림 확인에 쓴다 */
+int full_read(void) {
+	return full_now();
+}
+
 /* 한 번 감지된 만재는 해제 전까지 유지한다 */
 int full_get(void) {
 	full |= full_now();
 	return full;
 }
 
-/* 센서가 다 0일 때만 해제한다 */
+/* 아직 감지 중인 것만 남기고 나머지는 해제한다 */
 int full_clear(void) {
-	if (full_now())
-		return 0;
+	full = full_now();
 
-	full = 0;
-	return 1;
+	return !full;
 }
 /* 대기 상태 램프 */
 static void lamp_idle(void) {
@@ -143,12 +147,37 @@ void HAL_GPIO_EXTI_Callback(uint16_t pin) {
 		if (estop) {
 			run = 0;
 			pause = 0;
+			full_pause = 0;
 
 			lamp_estop();
 		} else {
 			lamp_idle();
 		}
 	}
+}
+
+/* 일시정지. F 만재 M 버튼 S RFID T 걸림.
+   F 와 T 는 센서가 비어야 풀린다 */
+void pause_on(char why) {
+	pause = 1;
+	run = 0;
+	full_pause = (why == 'F' || why == 'T');
+
+	lamp_pause();
+	pause_msg(why);
+}
+
+/* 만재가 빠졌으면 정지를 푼다 */
+int full_release(void) {
+	if (!full_clear())
+		return 0;
+
+	full_pause = 0;
+	pause = 0;
+	run = 1;
+
+	lamp_run();
+	return 1;
 }
 
 /* 블로킹 동작 중 확인. 하던 명령은 끝내니 ESTOP 만 끊는다 */
@@ -181,11 +210,7 @@ void button_run(void) {
 	/* 일시정지 */
 	if (pause_req) {
 		pause_req = 0;
-		pause = 1;
-		run = 0;
-
-		lamp_pause();
-		print("01S_1\r\n");
+		pause_on('M');
 		return;
 	}
 
@@ -193,10 +218,16 @@ void button_run(void) {
 		return;
 
 	start_req = 0;
-	full_clear();         /* 시작 버튼에서 만재 해제 */
+
+	/* 만재로 멈춘 것은 센서가 비어야 풀린다 */
+	if (full_pause) {
+		print(full_release() ? "FULL CLEAR\r\n" : "FULL\r\n");
+		return;
+	}
 
 	/* 일시정지 해제 */
 	if (pause) {
+		full_clear();     /* 시작 버튼에서 만재 해제 */
 		pause = 0;
 		run = 1;
 

@@ -24,7 +24,7 @@ extern UART_HandleTypeDef huart5;
 #define ID			2
 
 /* 5.2 */
-#define CURRENT     800    /* mA. 57D 상한 5200 (19쪽) */
+#define CURRENT     3200    /* mA. 57D 상한 5200 (19쪽) */
 #define MSTEP       16      /* 16/32/64 여야 speed 값이 곧 RPM (6.1) */
 #define EN_HOLD     2       /* En 핀과 무관하게 항상 켜짐 */
 #define MODE_VFOC   5       /* SR_vFOC. 최대 3000RPM (6.1) */
@@ -191,7 +191,6 @@ int mks_init(void) {
 			&& mks_write(ID, CMD_CURRENT, CURRENT, 2)
 			&& mks_write(ID, CMD_MSTEP, MSTEP, 1)
 			&& mks_write(ID, CMD_EN_LVL, EN_HOLD, 1)
-			&& mks_write(ID, CMD_STALL, 1, 1)
 			&& home_set(HM_TRIG, HM_DIR, HM_RPM, HM_LIMIT)
 			&& mks_write(ID, CMD_ENABLE, 1, 1);
 }

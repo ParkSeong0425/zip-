@@ -19,7 +19,6 @@ typedef enum {
 	CMD_MSTEP = 0x84,       /* 5.2 세분화 */
 	CMD_EN_LVL = 0x85,      /* 5.2 En 레벨.  0=Low 1=High 2=Hold */
 	CMD_RESPOND = 0x8C,     /* 5.2 응답 패킷 */
-	CMD_STALL = 0x88,       /* 5.2 모터 구속 보호 */
 	CMD_HOME_SET = 0x90,	/* 5.4 홈 파라미터 설정 */
 	CMD_GO_HOME = 0x91,		/* 5.4 홈 가도록 설정 */
 	CMD_ZERO = 0x92,        /* 5.4 지금 자리를 0 으로.  Data 없음 */

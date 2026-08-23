@@ -16,8 +16,11 @@ extern volatile int estop;
 void button_init(void);
 void HAL_GPIO_EXTI_Callback(uint16_t pin);
 void button_run(void);
+void pause_on(char why);
+int full_release(void);
 
 int full_get(void);
+int full_read(void);
 int full_clear(void);
 int button_stop_requested(void);
 

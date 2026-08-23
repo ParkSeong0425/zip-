@@ -48,6 +48,8 @@ Motor motorY = { &huart5, rs4852_GPIO_Port, rs4852_Pin};
 
 #define R_REALPOS       0x0B07
 #define R_DI            0x0B03
+#define R_ERR_CODE      0x0B22  /* H0B_34 그 고장의 코드 */
+#define R_ERR_RST       0x0D01  /* H0D_01 고장 리셋 */
 
 #define R_ADDR          0x0C00
 
@@ -134,14 +136,14 @@ static int write16(Motor *m, uint16_t reg, uint16_t val) {
 	return 1;
 }
 
-/* 쓰기 3회 재시도 */
+/* write16 함수 3회 재시도 정상 성공시 30ms 추가 대기  */
 static int set16(Motor *m, uint16_t reg, uint16_t val) {
 	for (int i = 0; i < 3; i++) {
 		if (write16(m, reg, val)) {
 			HAL_Delay(30);
 			return 1;
 		}
-		HAL_Delay(50);
+		HAL_Delay(50); // 응답이 없으면 500ms 뒤 다시 시도 해서 3회 재시도해서 1.7초 걸림
 	}
 	return 0;
 }
@@ -328,4 +330,16 @@ int motor_stop(Motor *m) {
 /* AIM 모터 비상정지 설정/해제 */
 int motor_estop(Motor *m, int on) {
     return set16(m, R_DI5L, on);
+}
+
+/* H0B_34 현재 고장 코드 읽기 */
+int motor_alarm(Motor *m, uint16_t *out) {
+	return read16(m, R_ERR_CODE, out);
+}
+
+/* X 로만 먼저 시험. Y 는 브레이크 확인 후 */
+int motor_reset(Motor *m) {
+	return set16(m, R_DI2L, 0)
+			&& set16(m, R_ERR_RST, 1)
+			&& set16(m, R_DI2L, 1);
 }

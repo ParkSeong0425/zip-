@@ -27,5 +27,7 @@ int motor_pos(Motor *m, int *out);
 int motor_zero(Motor *m);
 int motor_home_on(Motor *m);
 int motor_estop(Motor *m, int on);
+int motor_alarm(Motor *m, uint16_t *out);
+int motor_reset(Motor *m);
 
 #endif
