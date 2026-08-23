@@ -49,11 +49,11 @@
 /* USER CODE BEGIN Variables */
 
 /* USER CODE END Variables */
-/* Definitions for defaultTask */
-osThreadId_t defaultTaskHandle;
-const osThreadAttr_t defaultTask_attributes = {
-  .name = "defaultTask",
-  .stack_size = 128 * 4,
+/* Definitions for MOTOR_Task */
+osThreadId_t MOTOR_TaskHandle;
+const osThreadAttr_t MOTOR_Task_attributes = {
+  .name = "MOTOR_Task",
+  .stack_size = 1024 * 4,
   .priority = (osPriority_t) osPriorityNormal,
 };
 /* Definitions for NET_Task */
@@ -70,13 +70,23 @@ const osThreadAttr_t RFID_attributes = {
   .stack_size = 1024 * 4,
   .priority = (osPriority_t) osPriorityNormal,
 };
+/* Definitions for MOTOR_Queue */
+osMessageQueueId_t MOTOR_QueueHandle;
+const osMessageQueueAttr_t MOTOR_Queue_attributes = {
+  .name = "MOTOR_Queue"
+};
+/* Definitions for TCPQueue */
+osMessageQueueId_t TCPQueueHandle;
+const osMessageQueueAttr_t TCPQueue_attributes = {
+  .name = "TCPQueue"
+};
 
 /* Private function prototypes -----------------------------------------------*/
 /* USER CODE BEGIN FunctionPrototypes */
 
 /* USER CODE END FunctionPrototypes */
 
-void StartDefaultTask(void *argument);
+void StartMOTOR_Task(void *argument);
 void StartNET_Task(void *argument);
 void StartRFID_Task(void *argument);
 
@@ -104,14 +114,21 @@ void MX_FREERTOS_Init(void) {
   /* start timers, add new ones, ... */
   /* USER CODE END RTOS_TIMERS */
 
+  /* Create the queue(s) */
+  /* creation of MOTOR_Queue */
+  MOTOR_QueueHandle = osMessageQueueNew (64, sizeof(uint8_t), &MOTOR_Queue_attributes);
+
+  /* creation of TCPQueue */
+  TCPQueueHandle = osMessageQueueNew (64, sizeof(uint8_t), &TCPQueue_attributes);
+
   /* USER CODE BEGIN RTOS_QUEUES */
   /* add queues, ... */
 	CAN1_Start();
   /* USER CODE END RTOS_QUEUES */
 
   /* Create the thread(s) */
-  /* creation of defaultTask */
-  defaultTaskHandle = osThreadNew(StartDefaultTask, NULL, &defaultTask_attributes);
+  /* creation of MOTOR_Task */
+  MOTOR_TaskHandle = osThreadNew(StartMOTOR_Task, NULL, &MOTOR_Task_attributes);
 
   /* creation of NET_Task */
   NET_TaskHandle = osThreadNew(StartNET_Task, NULL, &NET_Task_attributes);
@@ -129,25 +146,19 @@ void MX_FREERTOS_Init(void) {
 
 }
 
-/* USER CODE BEGIN Header_StartDefaultTask */
+/* USER CODE BEGIN Header_StartMOTOR_Task */
 /**
-  * @brief  Function implementing the defaultTask thread.
+  * @brief  Function implementing the MOTOR_Task thread.
   * @param  argument: Not used
   * @retval None
   */
-/* USER CODE END Header_StartDefaultTask */
-void StartDefaultTask(void *argument)
+/* USER CODE END Header_StartMOTOR_Task */
+void StartMOTOR_Task(void *argument)
 {
-  /* USER CODE BEGIN StartDefaultTask */
-//	can_start();
-  /* Infinite loop */
-  for(;;)
-  {
-      osDelay(10);
-  }
-  /* USER CODE END StartDefaultTask */
+  /* USER CODE BEGIN StartMOTOR_Task */
+  MOTOR_TaskRun(argument);
+  /* USER CODE END StartMOTOR_Task */
 }
-
 /* USER CODE BEGIN Header_StartNET_Task */
 /**
 * @brief Function implementing the NET_Task thread.
