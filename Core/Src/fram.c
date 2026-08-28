@@ -25,6 +25,9 @@ extern SPI_HandleTypeDef hspi3;
 	주소 12~   위치 데이터 라서 ADDR은 12개
  */
 #define DATA_ADDR 12
+#define NET_ADDR  4096   /* TCP 설정. 위치 데이터와 안 겹치는 자리 */
+#define NET_MAGIC 0x4E54
+#define NET_N     6
 #define FRAM_SIZE 8192
 #define POS_N     8
 #define AXIS_N    4      /* 입고 X,Y / 출고 X,Y */
@@ -186,4 +189,24 @@ int rot_load(int rack, int *l, int *r, int *c, int *rpm) {
 	*c = v[2];
 	*rpm = v[3];
 	return 1;
+}
+
+/* TCP 설정을 읽는다. 저장된 게 없으면 0 */
+int net_load(int *v) {
+	uint16_t magic;
+
+	fram_read(NET_ADDR, &magic, sizeof(magic));
+	if (magic != NET_MAGIC)
+		return 0;
+
+	fram_read(NET_ADDR + 2, v, sizeof(int) * NET_N);
+	return 1;
+}
+
+/* TCP 설정을 저장한다 */
+void net_save(int *v) {
+	uint16_t magic = NET_MAGIC;
+
+	fram_write(NET_ADDR, &magic, sizeof(magic));
+	fram_write(NET_ADDR + 2, v, sizeof(int) * NET_N);
 }

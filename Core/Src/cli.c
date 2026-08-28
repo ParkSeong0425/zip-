@@ -98,7 +98,7 @@ static void cli_char(uint8_t c) {
 		cli_exec(line);
 
 		if (!framed)
-			put("> ");
+			put("\r\n> ");
 
 		framed = 0;
 		return;

@@ -162,20 +162,6 @@ void DebugMon_Handler(void)
 /******************************************************************************/
 
 /**
-  * @brief This function handles EXTI line 1 interrupt.
-  */
-void EXTI1_IRQHandler(void)
-{
-  /* USER CODE BEGIN EXTI1_IRQn 0 */
-
-  /* USER CODE END EXTI1_IRQn 0 */
-  HAL_GPIO_EXTI_IRQHandler(MOTOR_START_btn_Pin);
-  /* USER CODE BEGIN EXTI1_IRQn 1 */
-
-  /* USER CODE END EXTI1_IRQn 1 */
-}
-
-/**
   * @brief This function handles CAN1 RX0 interrupt.
   */
 void CAN1_RX0_IRQHandler(void)
@@ -198,7 +184,6 @@ void EXTI9_5_IRQHandler(void)
 
   /* USER CODE END EXTI9_5_IRQn 0 */
   HAL_GPIO_EXTI_IRQHandler(ESTOP_btn_Pin);
-  HAL_GPIO_EXTI_IRQHandler(STOP_btn_Pin);
   /* USER CODE BEGIN EXTI9_5_IRQn 1 */
 
   /* USER CODE END EXTI9_5_IRQn 1 */

@@ -70,11 +70,6 @@ const osThreadAttr_t RFID_attributes = {
   .stack_size = 1024 * 4,
   .priority = (osPriority_t) osPriorityNormal,
 };
-/* Definitions for MOTOR_Queue */
-osMessageQueueId_t MOTOR_QueueHandle;
-const osMessageQueueAttr_t MOTOR_Queue_attributes = {
-  .name = "MOTOR_Queue"
-};
 /* Definitions for TCPQueue */
 osMessageQueueId_t TCPQueueHandle;
 const osMessageQueueAttr_t TCPQueue_attributes = {
@@ -115,9 +110,6 @@ void MX_FREERTOS_Init(void) {
   /* USER CODE END RTOS_TIMERS */
 
   /* Create the queue(s) */
-  /* creation of MOTOR_Queue */
-  MOTOR_QueueHandle = osMessageQueueNew (64, sizeof(uint8_t), &MOTOR_Queue_attributes);
-
   /* creation of TCPQueue */
   TCPQueueHandle = osMessageQueueNew (64, sizeof(uint8_t), &TCPQueue_attributes);
 
@@ -159,6 +151,7 @@ void StartMOTOR_Task(void *argument)
   MOTOR_TaskRun(argument);
   /* USER CODE END StartMOTOR_Task */
 }
+
 /* USER CODE BEGIN Header_StartNET_Task */
 /**
 * @brief Function implementing the NET_Task thread.

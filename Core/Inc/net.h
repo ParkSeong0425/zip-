@@ -12,6 +12,12 @@
 #define ACK       0x06    /* 수락 */
 #define NAK       0x15    /* 거절 */
 
+int mks_link(void);
+void pause_full(int mask);
+int button_stop_requested(void);
+void lamp_cmd(char *s);
+void lamp_run(char state, int card);
+
 void save_to_motor_queue(const char *command); /* NET_Task → MotorQueue */
 void send_to_tcp_queue(const char *response);  /* MOTOR_Task → TCPQueue */
 void print(const char *s);   /* UART3 에만. 프레임 없음 */

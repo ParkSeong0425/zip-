@@ -1,25 +1,33 @@
 /*
  * button.c
  *
- *  Created on: Jul 22, 2026
- *      Author: kotec
+ * 버튼은 PULLUP 입력이라 눌렀을 때 LOW 다. 50ms 이상 눌리면 한 번만 동작한다.
+ * 만재는 정지하지 않는다. 해당 층 PO 를 MO 로 바꾸는 판단에만 쓴다.
  */
 
 #include "button.h"
 #include "net.h"
 #include "motor.h"
+#include <stdio.h>
+int alarm_get(void); void alarm_set(int code); extern volatile int card_ok;
 
-#define DEBOUNCE 200U
+#define BUTTON_COUNT 5   /* button_run 10ms x 5 = 50ms */
+#define TICK_FAST    12  /* 240ms 점멸 */
+#define TICK_SLOW    25  /* 500ms 점멸 */
+#define FULL_DELAY   1000 /* 만재가 비고 다시 시작하기까지 */
+#define RFID_DELAY   1000 /* RFID가 인식되고 다시 시작하기까지 */
 
 volatile int run;
 volatile int pause;
 volatile int estop;
 
-static volatile int start_req;
-static volatile int pause_req;
-static volatile int estop_req;
-static volatile int full;  // 전부 1일때 만재 나느 상황
-static volatile int full_pause;  // 만재로 멈춰 있으면 1
+static int lamp_count;  /* button_run 10ms 호출 횟수 */
+static char lamp_mode;  /* W 운전, P 일시정지, E ESTOP, I 원점복귀, A 알람 */
+static int tcp_mode[2], tcp_left[2], tcp_count, tcp_on, tcp_auto;
+static volatile char pause_reason; /* M 버튼, F 만재, S RFID */
+static int full_mask;       /* 정지시킨 층 비트 */
+static uint32_t full_time;  /* 만재가 비어진 시각 */
+static uint32_t rfid_time;  /* 만재가 비어진 시각 */
 
 /* F1~F4 현재 만재 입력을 비트로 읽는다 */
 static int full_now(void) {
@@ -29,209 +37,250 @@ static int full_now(void) {
 			| (HAL_GPIO_ReadPin(F4_GPIO_Port, F4_Pin) ? 0 : 8);
 }
 
-/* 지금 센서 값만 본다. 걸림 확인에 쓴다 */
-int full_read(void) {
-	return full_now();
-}
+/* 만재는 저장하지 않는다. 항상 지금 값을 준다 */
+int full_read(void) { return full_now(); }
+int full_get(void)  { return full_now(); }
 
-/* 한 번 감지된 만재는 해제 전까지 유지한다 */
-int full_get(void) {
-	full |= full_now();
-	return full;
-}
-
-/* 아직 감지 중인 것만 남기고 나머지는 해제한다 */
-int full_clear(void) {
-	full = full_now();
-
-	return !full;
-}
-/* 대기 상태 램프 */
-static void lamp_idle(void) {
-	HAL_GPIO_WritePin(STOP_GPIO_Port, STOP_Pin, GPIO_PIN_SET);
-	HAL_GPIO_WritePin(MOTOR_START_GPIO_Port, MOTOR_START_Pin, GPIO_PIN_SET);
-	HAL_GPIO_WritePin(LAMP_RED_GPIO_Port, LAMP_RED_Pin, GPIO_PIN_SET);
-	HAL_GPIO_WritePin(LAMP_GREEN_GPIO_Port, LAMP_GREEN_Pin, GPIO_PIN_SET);
+/* 눌린 시간을 센다. 뗀 순간 0 이 되고 BUTTON_COUNT 에서 한 번만 걸린다 */
+void button_50ms(GPIO_TypeDef *port, uint16_t pin, uint8_t *count) {
+	if (HAL_GPIO_ReadPin(port, pin) != GPIO_PIN_RESET) { *count = 0; return; }
+	if (*count < BUTTON_COUNT + 1) (*count)++;
 }
 
 /* 자동 운전 상태 램프 */
-static void lamp_run(void) {
-	HAL_GPIO_WritePin(MOTOR_START_GPIO_Port, MOTOR_START_Pin, GPIO_PIN_RESET);
-	HAL_GPIO_WritePin(STOP_GPIO_Port, STOP_Pin, GPIO_PIN_SET);
-	HAL_GPIO_WritePin(LAMP_RED_GPIO_Port, LAMP_RED_Pin, GPIO_PIN_RESET);
-	HAL_GPIO_WritePin(LAMP_GREEN_GPIO_Port, LAMP_GREEN_Pin, GPIO_PIN_SET);
-}
-
-/* 일시정지 상태 램프 */
-static void lamp_pause(void) {
+void lamp_ready_start(void) {
+	lamp_mode = 'W'; lamp_count = 0;
+	HAL_GPIO_WritePin(MOTOR_ON_GPIO_Port, MOTOR_ON_Pin, GPIO_PIN_SET);
 	HAL_GPIO_WritePin(STOP_GPIO_Port, STOP_Pin, GPIO_PIN_RESET);
 	HAL_GPIO_WritePin(MOTOR_START_GPIO_Port, MOTOR_START_Pin, GPIO_PIN_SET);
-	HAL_GPIO_WritePin(LAMP_RED_GPIO_Port, LAMP_RED_Pin, GPIO_PIN_SET);
+	HAL_GPIO_WritePin(LAMP_RED_GPIO_Port, LAMP_RED_Pin, GPIO_PIN_RESET);
 	HAL_GPIO_WritePin(LAMP_GREEN_GPIO_Port, LAMP_GREEN_Pin, GPIO_PIN_RESET);
 }
 
-/* 비상정지 상태 램프 */
-static void lamp_estop(void) {
-	HAL_GPIO_WritePin(STOP_GPIO_Port, STOP_Pin, GPIO_PIN_SET);
-	HAL_GPIO_WritePin(MOTOR_START_GPIO_Port, MOTOR_START_Pin, GPIO_PIN_SET);
-	HAL_GPIO_WritePin(LAMP_RED_GPIO_Port, LAMP_RED_Pin, GPIO_PIN_SET);
-	HAL_GPIO_WritePin(LAMP_GREEN_GPIO_Port, LAMP_GREEN_Pin, GPIO_PIN_RESET);
-}
-
-/* 버튼 및 모터 전원 초기화 */
-void button_init(void) {
-	run = 0;
-	pause = 0;
-
-	estop = HAL_GPIO_ReadPin(ESTOP_btn_GPIO_Port, ESTOP_btn_Pin);
-
-	start_req = 0; // 시작 버튼
-	pause_req = 0; // 일시정지 버튼
-	estop_req = estop; // 전원 투입 때 눌려 있으면 정지 요청
-	full = 0;
-
-	/* MOTOR_ON은 Active High */
-	HAL_GPIO_WritePin( MOTOR_ON_GPIO_Port, MOTOR_ON_Pin, GPIO_PIN_SET);
-
-	if (estop)
-		lamp_estop();
-	else
-		lamp_idle();
-}
-
-/* GPIO 외부 인터럽트 */
-void HAL_GPIO_EXTI_Callback(uint16_t pin) {
-	static uint32_t last[3];
-	uint32_t now = HAL_GetTick();
-
-	/* PG1: 시작 또는 재시작 */
-	if (pin == MOTOR_START_btn_Pin) {
-		if (now - last[0] < DEBOUNCE)
-			return;
-
-		last[0] = now;
-
-		if (!estop)
-			start_req = 1;
-
-		return;
-	}
-
-	/* STOP 버튼: 요청만 세운다 */
-	if (pin == STOP_btn_Pin) {
-		if (now - last[1] < DEBOUNCE)
-			return;
-
-		last[1] = now;
-
-		pause_req = 1;
-
-		/* 눌린 것은 바로 알려준다 */
+/* 일시정지: STOP 500ms 점멸 */
+void lamp_pause(void) {
+	if (lamp_mode != 'P') {
+		lamp_mode = 'P'; lamp_count = 0;
+		HAL_GPIO_WritePin(MOTOR_START_GPIO_Port, MOTOR_START_Pin, GPIO_PIN_RESET);
 		HAL_GPIO_WritePin(STOP_GPIO_Port, STOP_Pin, GPIO_PIN_RESET);
 		return;
 	}
+	if (++lamp_count < TICK_SLOW) return;
+	lamp_count = 0;
+	HAL_GPIO_TogglePin(STOP_GPIO_Port, STOP_Pin);
+}
 
-	/* ESTOP 버튼: 비상정지 또는 해제 */
-	if (pin == ESTOP_btn_Pin) {
-		if (now - last[2] < DEBOUNCE)
-			return;
+/* 램프 전체 점멸. tick 주기, motor는 MOTOR_ON 포함 여부 */
+void lamp_blink(char mode, int tick, int motor) {
+	if (lamp_mode != mode) {
+		lamp_mode = mode; lamp_count = 0;
+		HAL_GPIO_WritePin(MOTOR_ON_GPIO_Port, MOTOR_ON_Pin, GPIO_PIN_SET);
+		HAL_GPIO_WritePin(STOP_GPIO_Port, STOP_Pin, GPIO_PIN_SET);
+		HAL_GPIO_WritePin(MOTOR_START_GPIO_Port, MOTOR_START_Pin, GPIO_PIN_SET);
+		HAL_GPIO_WritePin(LAMP_RED_GPIO_Port, LAMP_RED_Pin, GPIO_PIN_SET);
+		HAL_GPIO_WritePin(LAMP_GREEN_GPIO_Port, LAMP_GREEN_Pin, GPIO_PIN_SET);
+		return;
+	}
+	if (++lamp_count < tick) return;
+	lamp_count = 0;
+	HAL_GPIO_TogglePin(STOP_GPIO_Port, STOP_Pin);
+	HAL_GPIO_TogglePin(MOTOR_START_GPIO_Port, MOTOR_START_Pin);
+	HAL_GPIO_TogglePin(LAMP_RED_GPIO_Port, LAMP_RED_Pin);
+	HAL_GPIO_TogglePin(LAMP_GREEN_GPIO_Port, LAMP_GREEN_Pin);
+	if (motor) HAL_GPIO_TogglePin(MOTOR_ON_GPIO_Port, MOTOR_ON_Pin);
+}
 
-		last[2] = now;
+/* ESTOP과 RFID 미인식: 240ms, MOTOR_ON 유지 */
+void lamp_estop(void) { lamp_blink('E', TICK_FAST, 0); }
 
-		estop = HAL_GPIO_ReadPin(
-		ESTOP_btn_GPIO_Port,
-		ESTOP_btn_Pin);
+/* 원점복귀: 500ms, MOTOR_ON 포함 */
+void lamp_home(void) { lamp_blink('I', TICK_SLOW, 1); } // 모터 전원 램프도 같이 일때는 1
 
-		estop_req = 1;
+/* 모터 알람: 240ms, MOTOR_ON 포함 */
+void lamp_alarm(void) { lamp_blink('A', TICK_FAST, 1); }
 
-		if (estop) {
-			run = 0;
-			pause = 0;
-			full_pause = 0;
+/* TCP LAMP 명령을 10ms마다 실행한다 */
+static void lamp_tcp(void) {
+	int i;
+	if (tcp_mode[0] < 2) HAL_GPIO_WritePin(LAMP_RED_GPIO_Port,
+			LAMP_RED_Pin, tcp_mode[0] ? GPIO_PIN_SET : GPIO_PIN_RESET);
+	if (tcp_mode[1] < 2) HAL_GPIO_WritePin(LAMP_GREEN_GPIO_Port,
+			LAMP_GREEN_Pin, tcp_mode[1] ? GPIO_PIN_SET : GPIO_PIN_RESET);
+	if (++tcp_count >= TICK_SLOW) {
+		tcp_count = 0;
+		if (tcp_mode[0] == 2) HAL_GPIO_TogglePin(LAMP_RED_GPIO_Port, LAMP_RED_Pin);
+		if (tcp_mode[1] == 2) HAL_GPIO_TogglePin(LAMP_GREEN_GPIO_Port, LAMP_GREEN_Pin);
+	}
+	for (i = 0; i < 2; i++)
+		if (tcp_left[i] > 0 && --tcp_left[i] == 0) tcp_mode[i] = 0;
+	if (tcp_auto && !tcp_left[0] && !tcp_left[1]) tcp_on = 0;
+}
 
-			lamp_estop();
-		} else {
-			lamp_idle();
-		}
+/* 01LL_1_1_10&L_1_2_00: 적색 점등, 녹색 소등 */
+void lamp_cmd(char *s) {
+	int c1, id1, m1, t1, c2, id2, m2, t2; char b[64];
+	if (sscanf(s, "01LL_%d_%d_%1d%d&L_%d_%d_%1d%d", &c1, &id1, &m1, &t1,
+			&c2, &id2, &m2, &t2) != 8 || c1 != 1 || c2 != 1 || id1 < 1
+			|| id1 > 2 || id2 < 1 || id2 > 2 || id1 == id2 || m1 < 0
+			|| m1 > 2 || m2 < 0 || m2 > 2 || t1 < 0 || t1 > 60 || t2 < 0 || t2 > 60) {
+		snprintf(b, sizeof(b), "01%cL_bad_data", NAK); reply(b); return;
+	}
+	tcp_mode[id1 - 1] = m1; tcp_mode[id2 - 1] = m2;
+	tcp_left[id1 - 1] = m1 == 2 ? (t1 ? t1 * 100 : -1) : 0;
+	tcp_left[id2 - 1] = m2 == 2 ? (t2 ? t2 * 100 : -1) : 0;
+	tcp_auto = (m1 == 2 && t1) || (m2 == 2 && t2);
+	tcp_count = 0; tcp_on = 1; lamp_ready_start();
+	snprintf(b, sizeof(b), "01%c%s", ACK, s + 2); reply(b);
+}
+
+/* ESTOP, 알람, 원점복귀, TCP 명령, 일시정지 순서로 램프를 고른다 */
+void lamp_run(char state, int card) {
+	if (estop) lamp_estop();
+	else if (state == 'A') lamp_alarm();
+	else if (state == 'I')  lamp_home();
+	else if (tcp_on) lamp_tcp();
+	else if (!card) lamp_estop();
+	else if (pause) lamp_pause();
+	else lamp_ready_start();
+}
+
+void button_init(void) {
+	run = 1;       /* 전원 시작 시 운전 가능 상태 */
+	pause = 0;
+	estop = HAL_GPIO_ReadPin(ESTOP_btn_GPIO_Port, ESTOP_btn_Pin);
+	if (estop) {
+		alarm_set(9);
+		lamp_estop();
+	} else {
+		lamp_ready_start();
 	}
 }
 
-/* 일시정지. F 만재 M 버튼 S RFID T 걸림.
-   F 와 T 는 센서가 비어야 풀린다 */
+/* 일시정지. M 버튼, F 만재, S RFID */
 void pause_on(char why) {
 	pause = 1;
 	run = 0;
-	full_pause = (why == 'F' || why == 'T');
-
+	pause_reason = why;
 	lamp_pause();
 	pause_msg(why);
 }
 
-/* 만재가 빠졌으면 정지를 푼다 */
-int full_release(void) {
-	if (!full_clear())
-		return 0;
-
-	full_pause = 0;
-	pause = 0;
-	run = 1;
-
-	lamp_run();
-	return 1;
+/* 만재로 정지한다. mask 층이 비면 다시 시작한다 */
+void pause_full(int mask) {
+	full_mask = mask;
+	full_time = 0;
+	pause_on('F');
 }
 
-/* 블로킹 동작 중 확인. 하던 명령은 끝내니 ESTOP 만 끊는다 */
+/* PAUSE를 풀고 작업을 이어간다 */
+static void pause_off(void) {
+	pause = 0; run = 1; pause_reason = 0; full_mask = 0;
+	pause_msg(0); lamp_ready_start();
+}
+
+/* 블로킹 동작 중 ESTOP이나 알람이면 현재 명령을 끝낸다 */
 int button_stop_requested(void) {
-	return estop;
+	return estop || alarm_get();
 }
 
+/* ESTOP 입력이 바뀐 순간만 처리한다 */
+static void estop_change(int now)
+{
+    estop = now;
+    motor_estop(&motorX, estop);
+    motor_estop(&motorY, estop);
+    pause_msg(0);
+
+    if (estop) {
+        /* ESTOP 전에 알람이 있었다면 A로 기억 */
+        pause_reason = alarm_get() ? 'A' : 0;
+        run = 0;
+        pause = 0;
+        alarm_set(9);
+        lamp_estop();
+        net_cmd("01S_1");
+        print("ESTOP\r\n");
+    } else if (run && pause && pause_reason == 'A') {
+        /* RUN+PAUSE 복구 요청 후 ESTOP을 해제한 경우 */
+        pause = 0;
+        pause_reason = 0;
+        lamp_ready_start();
+        net_cmd("01I");
+        print("ALARM CLEAR HOME\r\n");
+    } else {
+        run = 0;
+        pause = 0;
+        pause_reason = 0;
+        alarm_set(0);
+        lamp_ready_start();
+        print("ESTOP CLEAR\r\n");
+    }
+}
 /* 버튼 요청 처리 */
 void button_run(void) {
-	full |= full_now();   /* 만재 센서 순간 감지 */
+	static uint8_t run_count, pause_count;
+	int now = HAL_GPIO_ReadPin(ESTOP_btn_GPIO_Port, ESTOP_btn_Pin);
 
-	/* 비상정지 및 해제 */
-	if (estop_req) {
-		estop_req = 0;
-		pause_req = 0;
+	button_50ms(MOTOR_START_btn_GPIO_Port, MOTOR_START_btn_Pin, &run_count);
+	button_50ms(STOP_btn_GPIO_Port, STOP_btn_Pin, &pause_count);
 
-		motor_estop(&motorX, estop);
-		motor_estop(&motorY, estop);
+	if (now != estop) {
+	    estop_change(now);
+	    return;
+	}
 
-		if (estop) {
-			net_cmd("01S_1");
-			print("ESTOP\r\n");
-		} else {
-			print("ESTOP CLEAR\r\n");
-			net_cmd("01I");
+	/* 기존 알람 후 ESTOP 상태에서 RUN+PAUSE를 같이 누르면 복구 요청 */
+	if (estop) {
+	    if (!run && pause_reason == 'A'
+	            && run_count >= BUTTON_COUNT
+	            && pause_count >= BUTTON_COUNT) {
+	        run = 1;
+	        pause = 1;
+	        pause_msg(0);
+	        print("ALARM CLEAR READY\r\n");
+	    }
+	    return;
+	}
+
+	/* 만재: 해당 층이 비고 FULL_DELAY가 지나면 이어서 한다 */
+	if (pause && pause_reason == 'F') {
+		if (full_now() & full_mask) full_time = 0;
+		else if (!full_time) full_time = HAL_GetTick();
+		else if (HAL_GetTick() - full_time >= FULL_DELAY) {
+			pause_off(); print("FULL CLEAR\r\n");
 		}
 		return;
 	}
 
-	/* 일시정지 */
-	if (pause_req) {
-		pause_req = 0;
-		pause_on('M');
+	/* RFID: 카드가 다시 인식되고 일정 시간이 지나면 이어서 한다 */
+	if (pause && pause_reason == 'S') {
+	    if (!card_ok)
+	        rfid_time = 0;
+	    else if (!rfid_time)
+	        rfid_time = HAL_GetTick();
+	    else if (HAL_GetTick() - rfid_time >= RFID_DELAY) {
+	        pause_off();
+	        print("RFID CLEAR\r\n");
+	    }
+	    return;
+	}
+
+	/* PF9: 운전 중이면 일시정지 */
+	if (pause_count == BUTTON_COUNT && !run_count) {
+		if (!pause) { pause_on('M'); print("PAUSE\r\n"); }
 		return;
 	}
 
-	if (!start_req)
-		return;
+	/* PG1: 일시정지 해제, 알람 복구, 원점복귀 */
+	if (run_count != BUTTON_COUNT || pause_count) return;
 
-	start_req = 0;
+	if (pause && pause_reason == 'M') {
+		pause_off(); print("START\r\n");
+	} else if (alarm_get()) {
+		run = 1; pause = 0; pause_reason = 0;
+		pause_msg(0); net_cmd("01I"); print("ALARM CLEAR HOME\r\n");
 
-	/* 만재로 멈춘 것은 센서가 비어야 풀린다 */
-	if (full_pause) {
-		print(full_release() ? "FULL CLEAR\r\n" : "FULL\r\n");
-		return;
-	}
-
-	/* 일시정지 해제 */
-	if (pause) {
-		full_clear();     /* 시작 버튼에서 만재 해제 */
-		pause = 0;
-		run = 1;
-
-		lamp_run();
-		print("START\r\n");
+	} else if (!run) {
+		run = 1; lamp_ready_start(); net_cmd("01I"); print("HOME\r\n");
 	}
 }

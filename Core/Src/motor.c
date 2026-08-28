@@ -48,8 +48,6 @@ Motor motorY = { &huart5, rs4852_GPIO_Port, rs4852_Pin};
 
 #define R_REALPOS       0x0B07
 #define R_DI            0x0B03
-#define R_ERR_CODE      0x0B22  /* H0B_34 그 고장의 코드 */
-#define R_ERR_RST       0x0D01  /* H0D_01 고장 리셋 */
 
 #define R_ADDR          0x0C00
 
@@ -86,27 +84,39 @@ static void bus_clear(Motor *m) {
 static HAL_StatusTypeDef bus_xfer(Motor *m, uint8_t *tx, uint16_t tn,
 		uint8_t *rx, uint16_t rn) {
 	HAL_StatusTypeDef r;
+	uint16_t check;
 
-	bus_clear(m);
+	for (int retry = 0; retry < 3; retry++) {
+		bus_clear(m);
 
-	/* 송신 방향 */
-	HAL_GPIO_WritePin(m->port, m->pin, GPIO_PIN_SET);
-	HAL_Delay(1);
+		/* 송신 방향 */
+		HAL_GPIO_WritePin(m->port, m->pin, GPIO_PIN_SET);
+		HAL_Delay(1);
 
-	r = HAL_UART_Transmit(m->uart, tx, tn, 100);
+		r = HAL_UART_Transmit(m->uart, tx, tn, 100);
 
-	/* 송신 완료를 기다린 뒤 수신 방향 */
-	while (__HAL_UART_GET_FLAG(m->uart, UART_FLAG_TC) == RESET) {
+		/* 송신 완료를 기다린 뒤 수신 방향 */
+		while (__HAL_UART_GET_FLAG(m->uart, UART_FLAG_TC) == RESET) {
+		}
+		for (volatile uint32_t i = 0; i < 100; i++) {
+		}
+		HAL_GPIO_WritePin(m->port, m->pin, GPIO_PIN_RESET);
+
+		if (r == HAL_OK)
+			r = HAL_UART_Receive(m->uart, rx, rn, 500);
+
+		if (r == HAL_OK) {
+			check = crc16(rx, rn - 2);
+			if (rx[0] == tx[0] && rx[1] == tx[1]
+					&& rx[rn - 2] == (uint8_t)check
+					&& rx[rn - 1] == (uint8_t)(check >> 8)) {
+				HAL_Delay(20);
+				return HAL_OK;
+			}
+		}
+		HAL_Delay(50);
 	}
-	for (volatile uint32_t i = 0; i < 100; i++) {
-	}
-	HAL_GPIO_WritePin(m->port, m->pin, GPIO_PIN_RESET);
-
-	if (r == HAL_OK)
-		r = HAL_UART_Receive(m->uart, rx, rn, 500);
-
-	HAL_Delay(20);
-	return r;
+	return HAL_ERROR;
 }
 
 /* ===== Modbus 읽기/쓰기 ===== */
@@ -136,16 +146,12 @@ static int write16(Motor *m, uint16_t reg, uint16_t val) {
 	return 1;
 }
 
-/* write16 함수 3회 재시도 정상 성공시 30ms 추가 대기  */
+/* 정상 쓰기 뒤 모터가 다음 명령을 받을 시간을 준다 */
 static int set16(Motor *m, uint16_t reg, uint16_t val) {
-	for (int i = 0; i < 3; i++) {
-		if (write16(m, reg, val)) {
-			HAL_Delay(30);
-			return 1;
-		}
-		HAL_Delay(50); // 응답이 없으면 500ms 뒤 다시 시도 해서 3회 재시도해서 1.7초 걸림
-	}
-	return 0;
+	if (!write16(m, reg, val))
+		return 0;
+	HAL_Delay(30);
+	return 1;
 }
 
 /* 0x03 단일 레지스터 읽기 */
@@ -246,8 +252,7 @@ static int read32(Motor *m, uint16_t reg, int *out) {
 int motor_init(Motor *m) {
 	uint16_t v;
 
-	if (!(read16(m, R_ADDR, &v) || read16(m, R_ADDR, &v))
-			|| v != ID)
+	if (!read16(m, R_ADDR, &v) || v != ID)
 		return 0;
 
 	return set16(m, R_DI1L, 0)
@@ -330,16 +335,4 @@ int motor_stop(Motor *m) {
 /* AIM 모터 비상정지 설정/해제 */
 int motor_estop(Motor *m, int on) {
     return set16(m, R_DI5L, on);
-}
-
-/* H0B_34 현재 고장 코드 읽기 */
-int motor_alarm(Motor *m, uint16_t *out) {
-	return read16(m, R_ERR_CODE, out);
-}
-
-/* X 로만 먼저 시험. Y 는 브레이크 확인 후 */
-int motor_reset(Motor *m) {
-	return set16(m, R_DI2L, 0)
-			&& set16(m, R_ERR_RST, 1)
-			&& set16(m, R_DI2L, 1);
 }

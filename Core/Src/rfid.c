@@ -5,7 +5,7 @@
 #include "net.h"
 
 #define RFID_CAN_ID 201
-#define POLL_MS     500   /* 카드 확인 주기 */
+#define POLL_MS     200   /* 카드 확인 주기 */
 #define WAIT_MS     200   /* 응답 대기 */
 
 volatile int card_ok;          /* 카드가 있으면 1 */
@@ -46,19 +46,22 @@ static int ask(void)
 void Rfid_Run(void)
 {
     char b[32];
+    int seen, miss = 0;
 
     for (;;) {
-        card_ok = ask();
+        seen = ask();
+        if (seen) { card_ok = 1; miss = 0; }
+        else if (++miss >= 3) card_ok = 0;
 
         if (show_req) {
             show_req = 0;
 
-            if (card_ok)
+            if (seen)
                 snprintf(b, sizeof(b),
-                        "02UT_1_%02X%02X%02X%02X\r\n",
+                        "01UT_1_%02X%02X%02X%02X\r\n",
                         uid[0], uid[1], uid[2], uid[3]);
             else
-                snprintf(b, sizeof(b), "02UU_1_00000000\r\n");
+                snprintf(b, sizeof(b), "01UU_1_00000000\r\n");
 
             reply(b);
         }

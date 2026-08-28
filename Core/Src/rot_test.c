@@ -36,12 +36,13 @@ extern UART_HandleTypeDef huart5;
 #define HM_LIMIT      0    /* 홈 후 축 잠금 유지 */
 
 /* 6.1 / 6.9 */
-#define ACC  180                     /* 3000rpm까지 값이 크면 더 빠르게 반응  */
-#define DEC  180                     /* 정지할 때도 마찬가지 */
+#define ACC  220                     /* 3000rpm까지 값이 크면 더 빠르게 반응  */
+#define DEC  220                     /* 정지할 때도 마찬가지 */
 #define Ocha 455                     /* 오차 0.5도 */
 
 #define DE_ON_US    20      /* 방향핀 송신 전환 후 대기 */
 #define RX_WAIT     500     /* 응답 대기 */
+static int link_ok;         /* 마지막 명령에 정상 응답이 왔으면 1 */
 
 
 /* ===== 통신 ===== */
@@ -88,14 +89,21 @@ static void send(uint8_t *tx, int n) {
 
 /* 보내고 rn 바이트를 받는다. Head/addr/Function/Check 가 맞으면 1 */
 static int xfer(uint8_t *tx, int n, uint8_t *rx, int rn) {
-	send(tx, n);
-	if (HAL_UART_Receive(&huart5, rx, rn, RX_WAIT) != HAL_OK)
-		return 0;
-	wait_ms(3);
-
-	return rx[0] == RX_HEAD && rx[1] == tx[1] && rx[2] == tx[2]
-			&& rx[rn - 1] == crc(rx, rn - 1);
+	link_ok = 0;
+	for (int retry = 0; retry < 3; retry++) {
+		send(tx, n);
+		if (HAL_UART_Receive(&huart5, rx, rn, RX_WAIT) == HAL_OK) {
+			wait_ms(3);
+			if (rx[0] == RX_HEAD && rx[1] == tx[1] && rx[2] == tx[2]
+					&& rx[rn - 1] == crc(rx, rn - 1))
+				return link_ok = 1;
+		}
+		wait_ms(50);
+	}
+	return 0;
 }
+
+int mks_link(void) { return link_ok; }
 
 /*
  * 쓰기.  FA | addr | Function | Data(n) | Check
@@ -206,13 +214,15 @@ int mks_done(int axis) {
 	int64_t error;
 
 	if (!mks_read(ID, CMD_STATE, 1, &state))
-		return 0;
+		return -1;
+	if (state == 0)
+		return -2;
 
 	if (state != ST_STOP)
 		return 0;
 
 	if (!mks_read(ID, CMD_AXIS, 6, &now))
-		return 0;
+		return -1;
 
 	error = (int64_t)now - (int64_t)axis;
 
