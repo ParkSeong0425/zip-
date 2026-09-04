@@ -51,8 +51,8 @@ Motor motorY = { &huart5, rs4852_GPIO_Port, rs4852_Pin};
 
 #define R_ADDR          0x0C00
 
-#define ACC_MS          1000    /* 위치이동 가감속 시간 */
-#define WAIT_MS         500     /* 한 구간 이동 후 대기 */
+#define ACC_MS          300    /* 위치이동 가감속 시간 */
+#define WAIT_MS         0     /* 한 구간 이동 후 대기 */
 
 
 /* ===== RS485 하위 통신 ===== */
@@ -81,6 +81,7 @@ static void bus_clear(Motor *m) {
 	}
 }
 
+// 3번정도 명령 보내주는 함수
 static HAL_StatusTypeDef bus_xfer(Motor *m, uint8_t *tx, uint16_t tn,
 		uint8_t *rx, uint16_t rn) {
 	HAL_StatusTypeDef r;
@@ -93,7 +94,7 @@ static HAL_StatusTypeDef bus_xfer(Motor *m, uint8_t *tx, uint16_t tn,
 		HAL_GPIO_WritePin(m->port, m->pin, GPIO_PIN_SET);
 		HAL_Delay(1);
 
-		r = HAL_UART_Transmit(m->uart, tx, tn, 100);
+		r = HAL_UART_Transmit(m->uart, tx, tn, 30); // 통신 반응을 줄이기 위해 30으로 한번 테스트
 
 		/* 송신 완료를 기다린 뒤 수신 방향 */
 		while (__HAL_UART_GET_FLAG(m->uart, UART_FLAG_TC) == RESET) {
@@ -103,7 +104,7 @@ static HAL_StatusTypeDef bus_xfer(Motor *m, uint8_t *tx, uint16_t tn,
 		HAL_GPIO_WritePin(m->port, m->pin, GPIO_PIN_RESET);
 
 		if (r == HAL_OK)
-			r = HAL_UART_Receive(m->uart, rx, rn, 500);
+			r = HAL_UART_Receive(m->uart, rx, rn, 100);
 
 		if (r == HAL_OK) {
 			check = crc16(rx, rn - 2);
@@ -114,7 +115,7 @@ static HAL_StatusTypeDef bus_xfer(Motor *m, uint8_t *tx, uint16_t tn,
 				return HAL_OK;
 			}
 		}
-		HAL_Delay(50);
+		HAL_Delay(10);
 	}
 	return HAL_ERROR;
 }
@@ -150,7 +151,7 @@ static int write16(Motor *m, uint16_t reg, uint16_t val) {
 static int set16(Motor *m, uint16_t reg, uint16_t val) {
 	if (!write16(m, reg, val))
 		return 0;
-	HAL_Delay(30);
+	HAL_Delay(10);
 	return 1;
 }
 
@@ -317,8 +318,7 @@ int motor_pos(Motor *m, int *out) {
 int motor_move(Motor *m, int rpm, int target) {
 
 	return set16(m, R_DI4L, 0)
-			&& write32(m, R_POS,
-					m->uart == &huart5 ? -target : target) // 위치 방향
+			&& write32(m, R_POS, m->uart == &huart5 ? -target : target) // 위치 방향
 			&& set16(m, R_SPEED, rpm)
 			&& set16(m, R_ACC, ACC_MS)
 			&& set16(m, R_WAIT, WAIT_MS)

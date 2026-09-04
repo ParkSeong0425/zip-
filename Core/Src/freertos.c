@@ -75,6 +75,11 @@ osMessageQueueId_t TCPQueueHandle;
 const osMessageQueueAttr_t TCPQueue_attributes = {
   .name = "TCPQueue"
 };
+/* Definitions for TCPMutex */
+osMutexId_t TCPMutexHandle;
+const osMutexAttr_t TCPMutex_attributes = {
+  .name = "TCPMutex"
+};
 
 /* Private function prototypes -----------------------------------------------*/
 /* USER CODE BEGIN FunctionPrototypes */
@@ -96,6 +101,9 @@ void MX_FREERTOS_Init(void) {
   /* USER CODE BEGIN Init */
 
   /* USER CODE END Init */
+  /* Create the mutex(es) */
+  /* creation of TCPMutex */
+  TCPMutexHandle = osMutexNew(&TCPMutex_attributes);
 
   /* USER CODE BEGIN RTOS_MUTEX */
   /* add mutexes, ... */
@@ -111,7 +119,7 @@ void MX_FREERTOS_Init(void) {
 
   /* Create the queue(s) */
   /* creation of TCPQueue */
-  TCPQueueHandle = osMessageQueueNew (64, sizeof(uint8_t), &TCPQueue_attributes);
+  TCPQueueHandle = osMessageQueueNew (512, sizeof(uint8_t), &TCPQueue_attributes);
 
   /* USER CODE BEGIN RTOS_QUEUES */
   /* add queues, ... */

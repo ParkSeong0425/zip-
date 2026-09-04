@@ -61,8 +61,10 @@ static char *third(char *s) {
 
 /* 저장된 설정을 불러온다. 없으면 기본값을 쓴다 */
 void cfg_init(void) {
-	if (!net_load(net_value))
+	if (!net_load(net_value)) {
 		memcpy(net_value, net_start, sizeof(net_value));
+		net_save(net_value);
+	}
 }
 
 /* 1 SIP 2 SN 3 GW 4 DIP 5 PORT 6 MODE */
