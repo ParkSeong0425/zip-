@@ -6,6 +6,7 @@
  */
 #include "motor.h"
 #include <string.h>
+#include <stdarg.h>
 
 extern UART_HandleTypeDef huart4;
 extern UART_HandleTypeDef huart5;
@@ -53,6 +54,9 @@ Motor motorY = { &huart5, rs4852_GPIO_Port, rs4852_Pin};
 
 #define ACC_MS          300    /* 위치이동 가감속 시간 */
 #define WAIT_MS         0     /* 한 구간 이동 후 대기 */
+/* 기존 motor.c의 32bit 순서 그대로: LOW -> HIGH */
+#define REG32(v) \
+	((uint16_t)(v)), ((uint16_t)((uint32_t)(v) >> 16))
 
 
 /* ===== RS485 하위 통신 ===== */
@@ -122,8 +126,11 @@ static HAL_StatusTypeDef bus_xfer(Motor *m, uint8_t *tx, uint16_t tn,
 
 /* ===== Modbus 읽기/쓰기 ===== */
 
-/* 0x06 단일 레지스터 쓰기. 응답은 요청과 완전히 같아야 한다 */
-static int write16(Motor *m, uint16_t reg, uint16_t val) {
+/* ===== Modbus 06H / 10H / 03H ===== */
+
+/* 06H : 단일 16bit 레지스터 쓰기 */
+static int write16(Motor *m, uint16_t reg, uint16_t val)
+{
 	uint8_t tx[8], rx[8];
 	uint16_t crc;
 
@@ -138,201 +145,176 @@ static int write16(Motor *m, uint16_t reg, uint16_t val) {
 	tx[6] = crc;
 	tx[7] = crc >> 8;
 
-	if (bus_xfer(m, tx, 8, rx, 8) != HAL_OK
-			|| memcmp(rx, tx, 6)
-			|| rx[6] != tx[6]
-			|| rx[7] != tx[7])
-		return 0;
-
-	return 1;
+	return bus_xfer(m, tx, 8, rx, 8) == HAL_OK
+			&& !memcmp(rx, tx, 8);
 }
 
-/* 정상 쓰기 뒤 모터가 다음 명령을 받을 시간을 준다 */
-static int set16(Motor *m, uint16_t reg, uint16_t val) {
-	if (!write16(m, reg, val))
+
+/* 10H : 시작 주소부터 연속된 레지스터를 한 번에 쓴다 */
+static int write_regs(Motor *m, uint16_t reg, uint8_t qty, ...)
+{
+	uint8_t tx[29], rx[8];
+	uint16_t crc, val;
+	va_list ap;
+
+	if (qty < 2 || qty > 10)
 		return 0;
-	HAL_Delay(10);
-	return 1;
-}
-
-/* 0x03 단일 레지스터 읽기 */
-static int read16(Motor *m, uint16_t reg, uint16_t *out) {
-	uint8_t tx[8], rx[7];
-	uint16_t crc;
-
-	tx[0] = ID;
-	tx[1] = 0x03;
-	tx[2] = reg >> 8;
-	tx[3] = reg;
-	tx[4] = 0;
-	tx[5] = 1;
-
-	crc = crc16(tx, 6);
-	tx[6] = crc;
-	tx[7] = crc >> 8;
-
-	if (bus_xfer(m, tx, 8, rx, 7) != HAL_OK)
-		return 0;
-
-	crc = crc16(rx, 5);
-
-	if (rx[0] != ID || rx[1] != 0x03 || rx[2] != 2 || rx[5] != (uint8_t) crc
-			|| rx[6] != (uint8_t) (crc >> 8))
-		return 0;
-
-	*out = ((uint16_t) rx[3] << 8) | rx[4];
-	return 1;
-}
-
-/* 0x10 2레지스터(32bit) 쓰기 */
-static int write32(Motor *m, uint16_t reg, int val) {
-	uint8_t tx[13], rx[8];
-	uint32_t raw = (uint32_t) val;
-	uint16_t lo = raw, hi = raw >> 16, crc;
 
 	tx[0] = ID;
 	tx[1] = 0x10;
 	tx[2] = reg >> 8;
 	tx[3] = reg;
 	tx[4] = 0;
-	tx[5] = 2;
-	tx[6] = 4;
-	tx[7] = lo >> 8;
-	tx[8] = lo;
-	tx[9] = hi >> 8;
-	tx[10] = hi;
+	tx[5] = qty;
+	tx[6] = qty * 2;
 
-	crc = crc16(tx, 11);
-	tx[11] = crc;
-	tx[12] = crc >> 8;
+	va_start(ap, qty);
 
-	if (bus_xfer(m, tx, 13, rx, 8) != HAL_OK)
+	for (uint8_t i = 0; i < qty; i++) {
+		val = (uint16_t)va_arg(ap, int);
+
+		tx[7 + i * 2] = val >> 8;
+		tx[8 + i * 2] = val;
+	}
+
+	va_end(ap);
+
+	crc = crc16(tx, 7 + qty * 2);
+
+	tx[7 + qty * 2] = crc;
+	tx[8 + qty * 2] = crc >> 8;
+
+	if (bus_xfer(m, tx, 9 + qty * 2, rx, 8) != HAL_OK)
 		return 0;
 
-	crc = crc16(rx, 6);
-
-	return rx[0] == ID && rx[1] == 0x10 && rx[2] == tx[2] && rx[3] == tx[3]
-			&& rx[4] == 0 && rx[5] == 2 && rx[6] == (uint8_t) crc
-			&& rx[7] == (uint8_t) (crc >> 8);
+	return rx[2] == tx[2]
+			&& rx[3] == tx[3]
+			&& rx[4] == 0
+			&& rx[5] == qty;
 }
 
-/* 0x03 2레지스터(32bit) 읽기 */
-static int read32(Motor *m, uint16_t reg, int *out) {
-	uint8_t tx[8], rx[9];
+
+/* 03H : 16bit / 32bit 읽기를 하나로 처리 */
+static int read_regs(Motor *m, uint16_t reg, int *out, uint8_t qty)
+{
+	uint8_t tx[8], rx[9], rn;
 	uint16_t crc, lo, hi;
+
+	if (qty < 1 || qty > 2)
+		return 0;
 
 	tx[0] = ID;
 	tx[1] = 0x03;
 	tx[2] = reg >> 8;
 	tx[3] = reg;
 	tx[4] = 0;
-	tx[5] = 2;
+	tx[5] = qty;
 
 	crc = crc16(tx, 6);
 	tx[6] = crc;
 	tx[7] = crc >> 8;
 
-	if (bus_xfer(m, tx, 8, rx, 9) != HAL_OK)
+	rn = 5 + qty * 2;
+
+	if (bus_xfer(m, tx, 8, rx, rn) != HAL_OK
+			|| rx[2] != qty * 2)
 		return 0;
 
-	crc = crc16(rx, 7);
+	/* 현재 오른쪽 motor.c의 word 순서 유지 */
+	lo = ((uint16_t)rx[3] << 8) | rx[4];
 
-	if (rx[0] != ID || rx[1] != 0x03 || rx[2] != 4 || rx[7] != (uint8_t) crc
-			|| rx[8] != (uint8_t) (crc >> 8))
-		return 0;
+	if (qty == 1) {
+		*out = lo;
+		return 1;
+	}
 
-	lo = ((uint16_t) rx[3] << 8) | rx[4];
-	hi = ((uint16_t) rx[5] << 8) | rx[6];
+	hi = ((uint16_t)rx[5] << 8) | rx[6];
 
-	*out = (int) (((uint32_t) hi << 16) | lo);
+	*out = (int)(((uint32_t)hi << 16) | lo);
+
 	return 1;
 }
 
+
 /* ===== 초기 설정 ===== */
 
-int motor_init(Motor *m) {
-	uint16_t v;
+int motor_init(Motor *m)
+{
+	int v;
 
-	if (!read16(m, R_ADDR, &v) || v != ID)
+	if (!read_regs(m, R_ADDR, &v, 1) || v != ID)
 		return 0;
 
-	return set16(m, R_DI1L, 0)
-			&& set16(m, R_DI2L, 0)
-			&& set16(m, R_DI3L, 0)
-			&& set16(m, R_DI4L, 0)
-			&& set16(m, R_DI5L, 0)
+	return
+			/* DI 기능과 Logic을 먼저 모두 해제 */
+			write_regs(m, R_DI1, 10, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0)
+			/* 기존 오른쪽 motor.c의 DI 설정 그대로 */
+			&& write_regs(m, R_DI1, 10, 31, 0, 1,  0, 32, 0, 28, 0, 34, 0)
+			/* 기존 설정값 그대로 */
+			&& write16(m, R_MODE, 1)
+			&& write16(m, R_SRC, 2)
+			&& write_regs(m, R_RUN, 3, 0, 1, 0)
+			&& write16(m, R_TYPE, 1)
+			/* 기존 X/Y HOME 방향 및 값 그대로 */
+			&& write_regs(m, R_HOME_MODE, 4,
+					m->uart == &huart5 ? 0 : 1, 350, 100, 300) // 원점 찾는 속도 , 센서 근처에서 다시 찾는 속도 , 원점 복귀 가감속
+			&& write_regs(m, R_HOME_OFF, 2, REG32(0))
+			/* 기존 DI 중복 설정 확인 */
+			&& read_regs(m, R_DI1, &v, 1) && v == 31
+			&& read_regs(m, R_DI2, &v, 1) && v == 1
+			&& read_regs(m, R_DI3, &v, 1) && v == 32
+			&& read_regs(m, R_DI4, &v, 1) && v == 28
+			&& read_regs(m, R_DI5, &v, 1) && v == 34
 
-		 /* 중복 방지를 위해 DI 기능을 먼저 해제 */
-		    && set16(m, R_DI1, 0)
-		    && set16(m, R_DI2, 0)
-		    && set16(m, R_DI3, 0)
-		    && set16(m, R_DI4, 0)
-		    && set16(m, R_DI5, 0)
-
-			&& set16(m, R_DI1, 31)
-			&& set16(m, R_DI2, 1)
-			&& set16(m, R_DI3, 32)
-			&& set16(m, R_DI4, 28)
-			&& set16(m, R_DI5, 34)
-
-			&& set16(m, R_MODE, 1)
-			&& set16(m, R_SRC, 2)
-			&& set16(m, R_RUN, 0)
-			&& set16(m, R_REG, 1)
-			&& set16(m, R_BEGIN, 0)
-			&& set16(m, R_TYPE, 1)
-
-			&& set16(m, R_HOME_MODE,
-					m->uart == &huart5 ? 0 : 1) // 홈 갈때 방향 감지
-			&& set16(m, R_HOME_FAST, 350)
-			&& set16(m, R_HOME_SLOW, 100)
-			&& set16(m, R_HOME_ACC, 1000) // 홈으로 갈때 가감속
-			&& write32(m, R_HOME_OFF, 0) // 전기,기계적 원점 확인하고 원점으로 해주는 데이터
-
-			/* DI 중복 설정 확인 후 Servo ON */
-			&& read16(m, R_DI1, &v) && v == 31
-			&& read16(m, R_DI2, &v) && v == 1
-			&& read16(m, R_DI3, &v) && v == 32
-			&& read16(m, R_DI4, &v) && v == 28
-			&& read16(m, R_DI5, &v) && v == 34
-			&& set16(m, R_DI2L, 1);
+			/* Servo ON */
+			&& write16(m, R_DI2L, 1);
 }
 
 /* ===== 동작 ===== */
-
 /* 센서를 찾아 원점복귀 */
-int motor_home_on(Motor *m) {
-    return set16(m, R_HOME_SEL, 4);
+int motor_home_on(Motor *m)
+{
+	return write16(m, R_HOME_SEL, 4);
 }
+
+
 /* 현재 위치를 소프트웨어 0으로 설정 */
-int motor_zero(Motor *m) {
-	return set16(m, R_HOME_SEL, 6);
+int motor_zero(Motor *m)
+{
+	return write16(m, R_HOME_SEL, 6);
 }
+
 
 /* H0B_07 현재 위치 읽기 */
-int motor_pos(Motor *m, int *out) {
-	return read32(m, R_REALPOS, out);
+int motor_pos(Motor *m, int *out)
+{
+	return read_regs(m, R_REALPOS, out, 2);
 }
 
-/* H11_04=1: 원점 기준 절대 목표 위치로 이동 */
-int motor_move(Motor *m, int rpm, int target) {
 
-	return set16(m, R_DI4L, 0)
-			&& write32(m, R_POS, m->uart == &huart5 ? -target : target) // 위치 방향
-			&& set16(m, R_SPEED, rpm)
-			&& set16(m, R_ACC, ACC_MS)
-			&& set16(m, R_WAIT, WAIT_MS)
-			&& set16(m, R_DI4L, 1);
+/* H11_04=1 : 원점 기준 절대 목표 위치로 이동 */
+int motor_move(Motor *m, int rpm, int target)
+{
+	int pos = m->uart == &huart5 ? -target : target;
+
+	return write16(m, R_DI4L, 0)
+			&& write_regs(m, R_POS, 5, REG32(pos), rpm, ACC_MS, WAIT_MS)
+			&& write16(m, R_DI4L, 1);
 }
 
-int motor_stop(Motor *m) {
+
+int motor_stop(Motor *m)
+{
 	int ok;
 
-	ok = set16(m, R_DI4L, 0);
-	return set16(m, R_HOME_SEL, 0) && ok;
+	ok = write16(m, R_DI4L, 0);
+
+	return write16(m, R_HOME_SEL, 0) && ok;
 }
 
+
 /* AIM 모터 비상정지 설정/해제 */
-int motor_estop(Motor *m, int on) {
-    return set16(m, R_DI5L, on);
+int motor_estop(Motor *m, int on)
+{
+	return write16(m, R_DI5L, on);
 }
