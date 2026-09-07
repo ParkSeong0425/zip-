@@ -20,12 +20,13 @@ extern Motor motorX;
 extern Motor motorY;
 
 /* 모두 1=성공 0=실패 */
-int motor_init(Motor *m);
+int motor_init(Motor *m, int reset);
 int motor_move(Motor *m, int rpm, int target);
 int motor_stop(Motor *m);
 int motor_pos(Motor *m, int *out);
 int motor_zero(Motor *m);
 int motor_home_on(Motor *m);
 int motor_estop(Motor *m, int on);
-
+int motor_alarm_reset(Motor *m);
+int motor_reset(Motor *m);
 #endif

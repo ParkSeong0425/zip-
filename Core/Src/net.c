@@ -188,8 +188,7 @@ void pause_msg(char why)
         return;
     }
 
-    snprintf(message, sizeof(message), "22P_PAUSE:%c_%.2s", why,
-            motor_line[0] ? motor_line : "00");
+    snprintf(message, sizeof(message), "22P_PAUSE:%c", why);
     send_to_tcp_queue(message);
     pause_repeat = why;
     pause_time = HAL_GetTick();
@@ -197,34 +196,37 @@ void pause_msg(char why)
 
 
 /* 현재 운전 상태와 버튼·만재 입력을 표시한다. */
-static void Check(int event) {
-    char message[48];
-    int full = full_get();
+static void Check(int event)
+{
+	char message[48];
+	int full = full_get();
 
-    if (estop) {
-        status = 'A';
-        alarm = 9;
-    }
+	if (estop) {
+		status = 'A';
+		alarm = 9;
+	}
 
-    if (event) {
-        if (estop || alarm == 9)
-            snprintf(message, sizeof(message), "00ESTOP");
-        else
-            snprintf(message, sizeof(message), "44A_%02d", alarm);
-        reply(message);
-        return;
-    }
+	if (event) {
+		snprintf(message, sizeof(message), "44A_%02d", alarm);
 
-    if (status == 'A')
-        snprintf(message, sizeof(message), "S_1_A_%02d&F_%d_%d%d%d%d",
-                alarm, rack_now, !!(full & 1), !!(full & 2),
-                !!(full & 4), !!(full & 8));
-    else
-        snprintf(message, sizeof(message), "S_1_%c&F_%d_%d%d%d%d",
-                pause ? 'P' : status, rack_now, !!(full & 1),
-                !!(full & 2), !!(full & 4), !!(full & 8));
+		print("ALARM MSG = ");
+		print(message);
+		print("\r\n");
 
-    ack(message);
+		reply(message);
+		return;
+	}
+
+	if (status == 'A')
+		snprintf(message, sizeof(message), "S_1_A_%02d&F_%d_%d%d%d%d",
+				alarm, rack_now, !!(full & 1), !!(full & 2),
+				!!(full & 4), !!(full & 8));
+	else
+		snprintf(message, sizeof(message), "S_1_%c&F_%d_%d%d%d%d",
+				pause ? 'P' : status, rack_now, !!(full & 1),
+				!!(full & 2), !!(full & 4), !!(full & 8));
+
+	ack(message);
 }
 
 /* 정지 중이거나 명령을 도는 중에도 받는 명령 */

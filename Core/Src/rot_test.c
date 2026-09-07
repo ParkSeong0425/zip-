@@ -19,6 +19,8 @@ extern UART_HandleTypeDef huart5;
 
 #define TX_HEAD     0xFA
 #define RX_HEAD     0xFB
+#define CMD_ALARM_RESET   0x3D
+#define CMD_RESET         0x41
 #define HEAD_N      3       /* Head + Slave addr + Function */
 #define ACK_N       5       /* + status + Check */
 #define ID			2
@@ -263,4 +265,16 @@ int mks_l(int rpm, int angle) {
 
 int mks_c(int rpm) {
 	return mks_move(rpm, 0);
+}
+
+/* ROT 보호 상태 해제 */
+int mks_alarm_reset(void)
+{
+	return mks_write(ID, CMD_ALARM_RESET, 0, 0);
+}
+
+/* ROT 모터 재시작 */
+int mks_reset(void)
+{
+	return mks_write(ID, CMD_RESET, 0, 0);
 }

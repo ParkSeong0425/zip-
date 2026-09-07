@@ -22,6 +22,7 @@
 extern volatile int card_ok;
 extern volatile int run;
 extern volatile uint32_t command_number;
+extern volatile int home_reset;
 
 int mks_link(void);
 void pause_full(int mask);
@@ -287,158 +288,167 @@ static void PO(int x, int y, int xy_rpm, int rot_rpm, int angle,
     status = 'R';
 }
 
-/* 틸트와 X/Y 원점복귀 */
+/* ROT -> X/Y 원점복귀 */
 static void I(void)
 {
-    int x, y, done;
-    uint32_t start;
+	int x, y, done;
+	uint32_t start;
 
-    status = 'I';
-    alarm = 0;
+	/* 알람 + ESTOP + START/STOP 복구일 때만 X/Y 재초기화 */
+	if (home_reset) {
+		home_reset = 0;
 
-    /* 이전 이동과 원점복귀 명령을 폐기한다 */
-    if (!motor_stop(&motorX)) { fail(2); return; }
-    if (!motor_stop(&motorY)) { fail(3); return; }
-    mks_stop();
+		if (!motor_init(&motorX, 1)) { fail(2); return; }
+		if (!motor_init(&motorY, 1)) { fail(3); return; }
 
-    /* X/Y ESTOP 해제 */
-    if (!motor_estop(&motorX, 0)) { fail(2); return; }
-    if (!motor_estop(&motorY, 0)) { fail(3); return; }
+		mks_alarm_reset();
+		mks_reset();
+		osDelay(1000);
 
-    /* 틸트 원점복귀 */
-    if (!mks_home()) {
-        fail(mks_link() ? 10 : 4);
-        return;
-    }
+		if (!mks_init()) {
+			fail(mks_link() ? 7 : 4);
+			return;
+		}
+	}
 
-    osDelay(50);
-    start = HAL_GetTick();
+	status = 'I';
+	alarm = 0;
 
-    for (;;) {
-        motor_check();
+	/* 이전 동작 정지 */
+	if (!motor_stop(&motorX)) { fail(2); return; }
+	if (!motor_stop(&motorY)) { fail(3); return; }
+	mks_stop();
 
-        if (button_stop_requested()) {
-            motor_estop(&motorX, 1);
-            motor_estop(&motorY, 1);
-            motor_stop(&motorX);
-            motor_stop(&motorY);
-            mks_stop();
-            return;
-        }
+	/* X/Y ESTOP 해제 */
+	if (!motor_estop(&motorX, 0)) { fail(2); return; }
+	if (!motor_estop(&motorY, 0)) { fail(3); return; }
 
-        if (pause) {
-            mks_stop();
-            if (!wait_pause()) return;
+	/* ROT HOME */
+	if (!mks_home()) {
+		fail(mks_link() ? 10 : 4);
+		return;
+	}
 
-            if (!mks_home()) {
-                fail(mks_link() ? 10 : 4);
-                return;
-            }
+	osDelay(50);
+	start = HAL_GetTick();
 
-            start = HAL_GetTick();
-            osDelay(50);
-            continue;
-        }
+	for (;;) {
+		motor_check();
 
-        done = mks_done(0);
+		if (button_stop_requested())
+			goto abort;
 
-        if (done > 0) break;
+		if (pause) {
+			mks_stop();
 
-        if (done < 0) {
-            fail(done == -1 ? 4 : 10);
-            return;
-        }
+			if (!wait_pause())
+				return;
 
-        if (HAL_GetTick() - start >= HOME_WAIT) {
-            fail(10);
-            return;
-        }
+			if (!mks_home()) {
+				fail(mks_link() ? 10 : 4);
+				return;
+			}
 
-        osDelay(10);
-    }
+			start = HAL_GetTick();
+			osDelay(50);
+			continue;
+		}
 
-    if (!mks_zero()) {
-        fail(mks_link() ? 10 : 4);
-        return;
-    }
+		done = mks_done(0);
 
-    /* 두 축 통신을 먼저 확인한 뒤 원점복귀를 시작한다 */
-    if (!motor_pos(&motorX, &x)) { fail(2); return; }
-    if (!motor_pos(&motorY, &y)) { fail(3); return; }
-    if (button_stop_requested()) {
-        motor_estop(&motorX, 1);
-        motor_estop(&motorY, 1);
-        motor_stop(&motorX);
-        motor_stop(&motorY);
-        mks_stop();
-        return;
-    }
+		if (done > 0)
+			break;
 
-    /* X/Y 원점복귀 시작 */
-    if (!motor_home_on(&motorX)) { fail(2); return; }
-    if (button_stop_requested()) {
-        motor_estop(&motorX, 1);
-        motor_estop(&motorY, 1);
-        motor_stop(&motorX);
-        motor_stop(&motorY);
-        mks_stop();
-        return;
-    }
-    if (!motor_home_on(&motorY)) { fail(3); return; }
+		if (done < 0) {
+			fail(done == -1 ? 4 : 10);
+			return;
+		}
 
-    osDelay(10);
-    start = HAL_GetTick();
+		if (HAL_GetTick() - start >= HOME_WAIT) {
+			fail(10);
+			return;
+		}
 
-    for (;;) {
-        motor_check();
+		osDelay(10);
+	}
 
-        if (button_stop_requested()) {
-            motor_estop(&motorX, 1);
-            motor_estop(&motorY, 1);
-            motor_stop(&motorX);
-            motor_stop(&motorY);
-            mks_stop();
-            return;
-        }
+	if (!mks_zero()) {
+		fail(mks_link() ? 10 : 4);
+		return;
+	}
 
-        if (pause) {
-            motor_stop(&motorX);
-            motor_stop(&motorY);
+	/* X/Y 통신 확인 */
+	if (!motor_pos(&motorX, &x)) { fail(2); return; }
+	if (!motor_pos(&motorY, &y)) { fail(3); return; }
 
-            if (!wait_pause()) return;
-            if (!motor_home_on(&motorX)) { fail(2); return; }
-            if (!motor_home_on(&motorY)) { fail(3); return; }
+	if (button_stop_requested())
+		goto abort;
 
-            start = HAL_GetTick();
-            osDelay(10);
-            continue;
-        }
+	/* X/Y HOME */
+	if (!motor_home_on(&motorX)) { fail(2); return; }
 
-        if (!motor_pos(&motorX, &x)) { fail(2); return; }
-        if (!motor_pos(&motorY, &y)) { fail(3); return; }
+	if (button_stop_requested())
+		goto abort;
 
-        if (abs(x) <= POSITION_GAP && abs(y) <= POSITION_GAP)
-            break;
+	if (!motor_home_on(&motorY)) { fail(3); return; }
 
-        if (HAL_GetTick() - start >= HOME_WAIT) {
-            fail(10);
-            return;
-        }
+	osDelay(10);
+	start = HAL_GetTick();
 
-        osDelay(10);
-    }
+	for (;;) {
+		motor_check();
 
-    /* X/Y 현재 위치를 0으로 설정 */
-    if (!motor_zero(&motorX)) { fail(2); return; }
-    if (!motor_zero(&motorY)) { fail(3); return; }
+		if (button_stop_requested())
+			goto abort;
 
-    /* RFID 인식 대기 */
-    if (!card_ok) {
-        pause_on('S');
-        if (!wait_pause()) return;
-    }
+		if (pause) {
+			motor_stop(&motorX);
+			motor_stop(&motorY);
 
-    status = 'W';
+			if (!wait_pause())
+				return;
+
+			if (!motor_home_on(&motorX)) { fail(2); return; }
+			if (!motor_home_on(&motorY)) { fail(3); return; }
+
+			start = HAL_GetTick();
+			osDelay(10);
+			continue;
+		}
+
+		if (!motor_pos(&motorX, &x)) { fail(2); return; }
+		if (!motor_pos(&motorY, &y)) { fail(3); return; }
+
+		if (abs(x) <= POSITION_GAP && abs(y) <= POSITION_GAP)
+			break;
+
+		if (HAL_GetTick() - start >= HOME_WAIT) {
+			fail(10);
+			return;
+		}
+
+		osDelay(10);
+	}
+
+	/* HOME 완료 */
+	if (!motor_zero(&motorX)) { fail(2); return; }
+	if (!motor_zero(&motorY)) { fail(3); return; }
+
+	if (!card_ok) {
+		pause_on('S');
+		if (!wait_pause())
+			return;
+	}
+
+	status = 'W';
+	return;
+
+abort: // 반복되는 긴급정지 처리를 한 곳으로 모으기 위해 사용하는 코드
+	motor_estop(&motorX, 1);
+	motor_estop(&motorY, 1);
+	motor_stop(&motorX);
+	motor_stop(&motorY);
+	mks_stop();
 }
 
 static void Stop(void)
@@ -603,11 +613,11 @@ void MOTOR_TaskRun(void *argument)
 
 	(void)argument;
 
-	while (!motor_init(&motorX))
+	while (!motor_init(&motorX,1))
 		osDelay(10);
 	print("x ready\r\n");
 
-	while (!motor_init(&motorY))
+	while (!motor_init(&motorY,1))
 		osDelay(10);
 	print("y ready\r\n");
 

@@ -51,6 +51,8 @@ Motor motorY = { &huart5, rs4852_GPIO_Port, rs4852_Pin};
 #define R_DI            0x0B03
 
 #define R_ADDR          0x0C00
+#define R_RESET         0x0D00  /* H0D_00 Software reset */
+#define R_ALARM_RESET   0x0D01  /* H0D_01 Error reset */
 
 #define ACC_MS          300    /* 위치이동 가감속 시간 */
 #define WAIT_MS         0     /* 한 구간 이동 후 대기 */
@@ -238,35 +240,34 @@ static int read_regs(Motor *m, uint16_t reg, int *out, uint8_t qty)
 
 /* ===== 초기 설정 ===== */
 
-int motor_init(Motor *m)
+int motor_init(Motor *m, int reset)
 {
 	int v;
+
+	if (reset) {
+		motor_alarm_reset(m);
+		motor_reset(m);
+		HAL_Delay(1000);
+	}
 
 	if (!read_regs(m, R_ADDR, &v, 1) || v != ID)
 		return 0;
 
 	return
-			/* DI 기능과 Logic을 먼저 모두 해제 */
 			write_regs(m, R_DI1, 10, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0)
-			/* 기존 오른쪽 motor.c의 DI 설정 그대로 */
-			&& write_regs(m, R_DI1, 10, 31, 0, 1,  0, 32, 0, 28, 0, 34, 0)
-			/* 기존 설정값 그대로 */
+			&& write_regs(m, R_DI1, 10, 31, 0, 1, 0, 32, 0, 28, 0, 34, 0)
 			&& write16(m, R_MODE, 1)
 			&& write16(m, R_SRC, 2)
 			&& write_regs(m, R_RUN, 3, 0, 1, 0)
 			&& write16(m, R_TYPE, 1)
-			/* 기존 X/Y HOME 방향 및 값 그대로 */
 			&& write_regs(m, R_HOME_MODE, 4,
-					m->uart == &huart5 ? 0 : 1, 350, 100, 300) // 원점 찾는 속도 , 센서 근처에서 다시 찾는 속도 , 원점 복귀 가감속
+					m->uart == &huart5 ? 0 : 1, 350, 100, 300)
 			&& write_regs(m, R_HOME_OFF, 2, REG32(0))
-			/* 기존 DI 중복 설정 확인 */
 			&& read_regs(m, R_DI1, &v, 1) && v == 31
 			&& read_regs(m, R_DI2, &v, 1) && v == 1
 			&& read_regs(m, R_DI3, &v, 1) && v == 32
 			&& read_regs(m, R_DI4, &v, 1) && v == 28
 			&& read_regs(m, R_DI5, &v, 1) && v == 34
-
-			/* Servo ON */
 			&& write16(m, R_DI2L, 1);
 }
 
@@ -317,4 +318,16 @@ int motor_stop(Motor *m)
 int motor_estop(Motor *m, int on)
 {
 	return write16(m, R_DI5L, on);
+}
+
+/* 드라이버 알람 해제 */
+int motor_alarm_reset(Motor *m)
+{
+	return write16(m, R_ALARM_RESET, 1);
+}
+
+/* 드라이버 소프트웨어 재시작 */
+int motor_reset(Motor *m)
+{
+	return write16(m, R_RESET, 1);
 }

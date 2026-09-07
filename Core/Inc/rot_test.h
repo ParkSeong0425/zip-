@@ -46,4 +46,6 @@ int mks_move(int rpm, int axis);
 int mks_home(void);     /* 0x34 센서 -> F5 정지 -> 0x92 */
 int mks_zero(void);     /* 0x92 두 대 모두 */
 int mks_stop(void);     /* F5 speed 0 acc DEC */
+int mks_alarm_reset(void);
+int mks_reset(void);
 #endif

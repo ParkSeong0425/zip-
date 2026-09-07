@@ -16,16 +16,18 @@ int alarm_get(void); void alarm_set(int code); extern volatile int card_ok;
 #define BUTTON_COUNT 5   /* button_run 10ms x 5 = 50ms */
 #define TICK_FAST    12  /* 240ms 점멸 */
 #define TICK_SLOW    25  /* 500ms 점멸 */
-#define FULL_DELAY   1000 /* 만재가 비고 다시 시작하기까지 1초 */
-#define RFID_DELAY   1000 /* RFID가 인식되고 다시 시작하기까지 1초*/
+#define FULL_DELAY   2000 /* 만재가 비고 다시 시작하기까지 1초 */
+#define RFID_DELAY   2000 /* RFID가 인식되고 다시 시작하기까지 1초*/
 
 volatile int run;
 volatile int pause;
 volatile int estop;
+volatile int home_reset;
 
-static int lamp_count;  /* button_run 10ms 호출 횟수 */
-static char lamp_mode;  /* W 운전, P 일시정지, E ESTOP, I 원점복귀, A 알람 */
-static int tcp_mode[2], tcp_left[2], tcp_count, tcp_on, tcp_auto;
+static int lamp_count;
+static char lamp_mode;
+static int tcp_mode[2], tcp_left[2], tcp_count, tcp_blink = 1, tcp_on;
+
 static volatile char pause_reason; /* M 버튼, F 만재, S RFID */
 static int full_mask;       /* 정지시킨 층 비트 */
 static uint32_t full_time;  /* 만재가 비어진 시각 */
@@ -101,38 +103,90 @@ void lamp_home(void) { lamp_blink('I', TICK_SLOW, 0); } // 모터 전원 램프�
 /* 모터 알람: 240ms, MOTOR_ON 포함 */
 void lamp_alarm(void) { lamp_blink('A', TICK_FAST, 1); }
 
-/* TCP LAMP 명령을 10ms마다 실행한다 */
-static void lamp_tcp(void) {
+/* TCP RED/GREEN 램프를 10ms마다 처리한다 */
+static void lamp_tcp(void)
+{
 	int i;
-	if (tcp_mode[0] < 2) HAL_GPIO_WritePin(LAMP_RED_GPIO_Port,
-			LAMP_RED_Pin, tcp_mode[0] ? GPIO_PIN_SET : GPIO_PIN_RESET);
-	if (tcp_mode[1] < 2) HAL_GPIO_WritePin(LAMP_GREEN_GPIO_Port,
-			LAMP_GREEN_Pin, tcp_mode[1] ? GPIO_PIN_SET : GPIO_PIN_RESET);
+
+	/* 500ms마다 점멸 상태 변경 */
 	if (++tcp_count >= TICK_SLOW) {
 		tcp_count = 0;
-		if (tcp_mode[0] == 2) HAL_GPIO_TogglePin(LAMP_RED_GPIO_Port, LAMP_RED_Pin);
-		if (tcp_mode[1] == 2) HAL_GPIO_TogglePin(LAMP_GREEN_GPIO_Port, LAMP_GREEN_Pin);
+		tcp_blink = !tcp_blink;
 	}
-	for (i = 0; i < 2; i++)
-		if (tcp_left[i] > 0 && --tcp_left[i] == 0) tcp_mode[i] = 0;
-	if (tcp_auto && !tcp_left[0] && !tcp_left[1]) tcp_on = 0;
+
+	/* 설정 시간이 끝나면 해당 색만 OFF */
+	for (i = 0; i < 2; i++) {
+		if (tcp_left[i] > 0 && --tcp_left[i] == 0)
+			tcp_mode[i] = 0;
+	}
+
+	/* 0=OFF, 1=ON, 2=점멸 */
+	HAL_GPIO_WritePin(LAMP_RED_GPIO_Port, LAMP_RED_Pin,
+			tcp_mode[0] == 1
+			|| (tcp_mode[0] == 2 && tcp_blink)
+			? GPIO_PIN_SET : GPIO_PIN_RESET);
+
+	HAL_GPIO_WritePin(LAMP_GREEN_GPIO_Port, LAMP_GREEN_Pin,
+			tcp_mode[1] == 1
+			|| (tcp_mode[1] == 2 && tcp_blink)
+			? GPIO_PIN_SET : GPIO_PIN_RESET);
+
+	/* 둘 다 끝났으면 TCP 램프 제어 종료 */
+	tcp_on = tcp_mode[0] || tcp_mode[1];
 }
 
-/* 01LL_1_1_10&L_1_2_00: 적색 점등, 녹색 소등 */
-void lamp_cmd(char *s) {
-	int c1, id1, m1, t1, c2, id2, m2, t2; char b[64];
-	if (sscanf(s, "01LL_%d_%d_%1d%d&L_%d_%d_%1d%d", &c1, &id1, &m1, &t1,
-			&c2, &id2, &m2, &t2) != 8 || c1 != 1 || c2 != 1 || id1 < 1
-			|| id1 > 2 || id2 < 1 || id2 > 2 || id1 == id2 || m1 < 0
-			|| m1 > 2 || m2 < 0 || m2 > 2 || t1 < 0 || t1 > 60 || t2 < 0 || t2 > 60) {
-		snprintf(b, sizeof(b), "01%cL_bad_data", NAK); reply(b); return;
+/* 01LL_1_1_10&L_1_2_00 : RED ON, GREEN OFF */
+void lamp_cmd(char *s)
+{
+	int c1, id1, m1, t1;
+	int c2, id2, m2, t2;
+	int p1, p2;
+	char b[64];
+
+	if (sscanf(s, "01LL_%d_%d_%1d%d&L_%d_%d_%1d%d",
+			&c1, &id1, &m1, &t1,
+			&c2, &id2, &m2, &t2) != 8
+			|| c1 != 1 || c2 != 1
+			|| id1 < 1 || id1 > 9
+			|| id2 < 1 || id2 > 9
+			|| ((id1 & 1) == (id2 & 1))
+			|| m1 < 0 || m1 > 2
+			|| m2 < 0 || m2 > 2
+			|| t1 < 0 || t1 > 60
+			|| t2 < 0 || t2 > 60) {
+
+		snprintf(b, sizeof(b), "01%cL_bad_data", NAK);
+		reply(b);
+		return;
 	}
-	tcp_mode[id1 - 1] = m1; tcp_mode[id2 - 1] = m2;
-	tcp_left[id1 - 1] = m1 == 2 ? (t1 ? t1 * 100 : -1) : 0;
-	tcp_left[id2 - 1] = m2 == 2 ? (t2 ? t2 * 100 : -1) : 0;
-	tcp_auto = (m1 == 2 && t1) || (m2 == 2 && t2);
-	tcp_count = 0; tcp_on = 1; lamp_ready_start();
-	snprintf(b, sizeof(b), "01%c%s", ACK, s + 2); reply(b);
+
+	/* 홀수 ID = RED(0), 짝수 ID = GREEN(1) */
+	p1 = (id1 & 1) ? 0 : 1;
+	p2 = (id2 & 1) ? 0 : 1;
+
+	tcp_mode[p1] = m1;
+	tcp_mode[p2] = m2;
+
+	/*
+	 * 시간 0 = 계속 유지
+	 * 1~60 = 해당 초 후 OFF
+	 */
+	tcp_left[p1] = m1 ? (t1 ? t1 * 100 : -1) : 0;
+	tcp_left[p2] = m2 ? (t2 ? t2 * 100 : -1) : 0;
+
+	tcp_count = 0;
+	tcp_blink = 1;
+	tcp_on = tcp_mode[0] || tcp_mode[1];
+
+	/* 점멸도 처음에는 ON부터 시작 */
+	HAL_GPIO_WritePin(LAMP_RED_GPIO_Port, LAMP_RED_Pin,
+			tcp_mode[0] ? GPIO_PIN_SET : GPIO_PIN_RESET);
+
+	HAL_GPIO_WritePin(LAMP_GREEN_GPIO_Port, LAMP_GREEN_Pin,
+			tcp_mode[1] ? GPIO_PIN_SET : GPIO_PIN_RESET);
+
+	snprintf(b, sizeof(b), "01%c%s", ACK, s + 2);
+	reply(b);
 }
 
 /* ESTOP, 알람, 원점복귀, TCP 명령, 일시정지 순서로 램프를 고른다 */
@@ -167,13 +221,31 @@ void lamp_run(char state, int card) {
 	}
 
 	if (!estop && !run && pause_reason == 'E') return;
-	if (estop) lamp_estop();
-	else if (state == 'A') lamp_alarm();
-	else if (state == 'I')  lamp_home();
-	else if (tcp_on) lamp_tcp();
-	else if (!card) lamp_estop();
-	else if (pause) lamp_pause();
-	else lamp_ready_start();
+	if (estop) {
+		lamp_estop();
+		return;
+	}
+
+	if (state == 'A') {
+		lamp_alarm();
+		return;
+	}
+
+	/*
+	 * 일반 상태 램프를 먼저 실행하고,
+	 * TCP가 있으면 RED/GREEN만 마지막에 덮어쓴다.
+	 */
+	if (state == 'I')
+		lamp_home();
+	else if (!card)
+		lamp_estop();
+	else if (pause)
+		lamp_pause();
+	else
+		lamp_ready_start();
+
+	if (tcp_on)
+		lamp_tcp();
 }
 
 void button_init(void) {
@@ -237,8 +309,12 @@ static void estop_change(int now)
 
 	/* 알람 중 PG1+PF9 복구가 끝났으면 ESTOP 해제 후 원점복귀 */
 	if (run && pause && pause_reason == 'A') {
-		pause = 0; pause_reason = 0;
-		lamp_home(); net_cmd("00I");
+		home_reset = 1;
+
+		pause = 0;
+		pause_reason = 0;
+		lamp_home();
+		net_cmd("00I");
 		print("ALARM ESTOP CLEAR HOME\r\n");
 		return;
 	}
