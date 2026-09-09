@@ -48,16 +48,39 @@ static void fail(int code) {
     alarm_set(code);
 }
 static void fail_rot(void) { fail(mks_link() ? 7 : 4); }
-static void motor_check(void) {
+static void motor_check(void)
+{
     static int count;
     int pos, state;
-    if (++count < 3) return;
+
+    if (++count < 3)
+        return;
+
     count = 0;
-    if (!motor_pos(&motorX, &pos)) { if (status != 'A' || alarm != 2) fail(2); return; }
-    if (!motor_pos(&motorY, &pos)) { if (status != 'A' || alarm != 3) fail(3); return; }
-    if (!mks_read(2, CMD_STATE, 1, &state)) { if (status != 'A' || alarm != 4) fail(4); return; }
-    if (state == ST_FAIL) { if (status != 'A' || alarm != 7) fail(7); return; }
-    if (!mks_read(2, CMD_AXIS, 6, &pos) && (status != 'A' || alarm != 4)) fail(4);
+
+    if (!motor_pos(&motorX, &pos)) {
+        if (status != 'A' || alarm != 2)
+            fail(2);
+        return;
+    }
+
+    if (!motor_pos(&motorY, &pos)) {
+        if (status != 'A' || alarm != 3)
+            fail(3);
+        return;
+    }
+
+    if (!mks_read(2, CMD_STATE, 1, &state)) {
+        if (status != 'A' || alarm != 4)
+            fail(4);
+        return;
+    }
+
+    if (state == ST_FAIL) {
+        if (status != 'A' || alarm != 7)
+            fail(7);
+        return;
+    }
 }
 static int move_xy(int x, int y, int rpm) {
     int x_now, y_now, x_rpm = rpm, y_rpm = rpm;
@@ -134,59 +157,199 @@ static void PO(int x, int y, int xy_rpm, int rot_rpm, int angle,
     if (!move_rot('c', rot_rpm, 0)) return;
     status = 'R';
 }
-static void I(void) {
+static void I(void)
+{
     int x, y, done;
     uint32_t start;
-    status = 'I'; alarm = 0; po_mask = 0;
-    if (!motor_stop(&motorX)) { fail(2); return; }
-    if (!motor_stop(&motorY)) { fail(3); return; }
+
+    status = 'I';
+    alarm = 0;
+    po_mask = 0;
+
+    /* X/Y ESTOP 해제 */
+    if (!motor_estop(&motorX, 0)) {
+        fail(2);
+        return;
+    }
+
+    if (!motor_estop(&motorY, 0)) {
+        fail(3);
+        return;
+    }
+
+    /* 이전 동작 정지 */
+    if (!motor_stop(&motorX)) {
+        fail(2);
+        return;
+    }
+
+    if (!motor_stop(&motorY)) {
+        fail(3);
+        return;
+    }
+
     mks_stop();
-    if (!motor_estop(&motorX, 0)) { fail(2); return; }
-    if (!motor_estop(&motorY, 0)) { fail(3); return; }
-    if (!mks_home()) { fail(mks_link() ? 10 : 4); return; }
-    osDelay(50); start = HAL_GetTick();
+
+    /* ROT HOME */
+    if (!mks_home()) {
+        fail(mks_link() ? 10 : 4);
+        return;
+    }
+
+    osDelay(50);
+    start = HAL_GetTick();
+
     for (;;) {
-        motor_check();
-        if (button_stop_requested()) goto abort;
+
+        if (button_stop_requested())
+            goto abort;
+
         if (pause) {
-            mks_stop(); if (!wait_pause()) return;
-            if (!mks_home()) { fail(mks_link() ? 10 : 4); return; }
-            start = HAL_GetTick(); osDelay(50); continue;
+            mks_stop();
+
+            if (!wait_pause())
+                return;
+
+            if (!mks_home()) {
+                fail(mks_link() ? 10 : 4);
+                return;
+            }
+
+            start = HAL_GetTick();
+            osDelay(50);
+            continue;
         }
-        done = mks_done(0);
-        if (done > 0) break;
-        if (done < 0) { fail(done == -1 ? 4 : 10); return; }
-        if (HAL_GetTick() - start >= HOME_WAIT) { fail(10); return; }
+
+        /* ROT HOME 완료 확인 */
+        if (!mks_read(2, CMD_STATE, 1, &done)) {
+            fail(4);
+            return;
+        }
+
+        if (done == ST_FAIL) {
+            fail(7);
+            return;
+        }
+
+        if (done == ST_STOP)
+            break;
+
+        if (HAL_GetTick() - start >= HOME_WAIT) {
+            fail(10);
+            return;
+        }
+
         osDelay(10);
     }
-    if (!mks_zero()) { fail(mks_link() ? 10 : 4); return; }
-    if (!motor_pos(&motorX, &x)) { fail(2); return; }
-    if (!motor_pos(&motorY, &y)) { fail(3); return; }
-    if (button_stop_requested()) goto abort;
-    if (!motor_home_on(&motorX)) { fail(2); return; }
-    if (button_stop_requested()) goto abort;
-    if (!motor_home_on(&motorY)) { fail(3); return; }
-    osDelay(10); start = HAL_GetTick();
+
+    /* ROT 현재 위치를 0으로 */
+    if (!mks_zero()) {
+        fail(mks_link() ? 10 : 4);
+        return;
+    }
+
+    /* X/Y 통신 확인 */
+    if (!motor_pos(&motorX, &x)) {
+        fail(2);
+        return;
+    }
+
+    if (!motor_pos(&motorY, &y)) {
+        fail(3);
+        return;
+    }
+
+    if (button_stop_requested())
+        goto abort;
+
+    /* X HOME */
+    if (!motor_home_on(&motorX)) {
+        fail(2);
+        return;
+    }
+
+    if (button_stop_requested())
+        goto abort;
+
+    /* Y HOME */
+    if (!motor_home_on(&motorY)) {
+        fail(3);
+        return;
+    }
+
+    osDelay(10);
+    start = HAL_GetTick();
+
+    /* X/Y HOME 완료 대기 */
     for (;;) {
-        motor_check();
-        if (button_stop_requested()) goto abort;
+
+        if (button_stop_requested())
+            goto abort;
+
         if (pause) {
-            motor_stop(&motorX); motor_stop(&motorY); if (!wait_pause()) return;
-            if (!motor_home_on(&motorX)) { fail(2); return; }
-            if (!motor_home_on(&motorY)) { fail(3); return; }
-            start = HAL_GetTick(); osDelay(10); continue;
+            motor_stop(&motorX);
+            motor_stop(&motorY);
+
+            if (!wait_pause())
+                return;
+
+            if (!motor_home_on(&motorX)) {
+                fail(2);
+                return;
+            }
+
+            if (!motor_home_on(&motorY)) {
+                fail(3);
+                return;
+            }
+
+            start = HAL_GetTick();
+            osDelay(10);
+            continue;
         }
-        if (!motor_pos(&motorX, &x)) { fail(2); return; }
-        if (!motor_pos(&motorY, &y)) { fail(3); return; }
-        if (abs(x) <= POSITION_GAP && abs(y) <= POSITION_GAP) break;
-        if (HAL_GetTick() - start >= HOME_WAIT) { fail(10); return; }
+
+        if (!motor_pos(&motorX, &x)) {
+            fail(2);
+            return;
+        }
+
+        if (!motor_pos(&motorY, &y)) {
+            fail(3);
+            return;
+        }
+
+        if (abs(x) <= POSITION_GAP &&
+            abs(y) <= POSITION_GAP)
+            break;
+
+        if (HAL_GetTick() - start >= HOME_WAIT) {
+            fail(10);
+            return;
+        }
+
         osDelay(10);
     }
-    if (!motor_zero(&motorX)) { fail(2); return; }
-    if (!motor_zero(&motorY)) { fail(3); return; }
-    status = 'W'; return;
+
+    /* X/Y 현재 위치 0 */
+    if (!motor_zero(&motorX)) {
+        fail(2);
+        return;
+    }
+
+    if (!motor_zero(&motorY)) {
+        fail(3);
+        return;
+    }
+
+    status = 'W';
+    return;
+
 abort:
-    motor_estop(&motorX, 1); motor_estop(&motorY, 1); motor_stop(&motorX); motor_stop(&motorY); mks_stop();
+    motor_estop(&motorX, 1);
+    motor_estop(&motorY, 1);
+    motor_stop(&motorX);
+    motor_stop(&motorY);
+    mks_stop();
 }
 static void Stop(void) {
     motor_stop(&motorX); motor_stop(&motorY); mks_stop();
@@ -269,29 +432,73 @@ static void motor_command(char *command) {
     if (!strcmp(cmd, "S_1")) { Stop(); return; }
     snprintf(message, sizeof(message), "%.2s%cbad_cmd", command, NAK); send_to_tcp_queue(message);
 }
-void MOTOR_TaskRun(void *argument) {
+void MOTOR_TaskRun(void *argument)
+{
     char command[64];
     int state;
+
     (void)argument;
-    while (!motor_init(&motorX, 0)) osDelay(10);
+
+    while (!motor_init(&motorX, 0))
+        osDelay(10);
+
     print("x ready\r\n");
-    while (!motor_init(&motorY, 0)) osDelay(10);
+
+    while (!motor_init(&motorY, 0))
+        osDelay(10);
+
     print("y ready\r\n");
-    while (!mks_read(2, CMD_STATE, 1, &state)) osDelay(10);
-    if (mks_init()) { print("mks ready\r\n"); while (!run && !estop) osDelay(10); if (!estop) net_cmd("00I"); } else {
-        print("mks init ERR\r\n"); status = 'A'; alarm = mks_link() ? 7 : 4;
+
+    while (!mks_read(2, CMD_STATE, 1, &state))
+        osDelay(10);
+
+    if (!mks_init()) {
+        print("mks init ERR\r\n");
+        fail(mks_link() ? 7 : 4);
     }
-    motor_estop(&motorX, estop); motor_estop(&motorY, estop);
+     else {
+            print("mks ready\r\n");
+
+            /* MKS 전원/통신 안정화 후 원점복귀 1회 */
+            osDelay(300);
+
+            while (!run && !estop)
+                osDelay(10);
+
+            if (!estop)
+                net_cmd("00I");
+        }
     for (;;) {
-        if (estop) {
-            motor_estop(&motorX, 1); motor_estop(&motorY, 1); motor_stop(&motorX); motor_stop(&motorY); mks_stop();
-            while (estop) osDelay(10);
-            continue;
-        }
-        if (motor_ready) {
-            snprintf(command, sizeof(command), "%s", motor_line); motor_ready = 0; motor_busy = 1; motor_command(command); motor_busy = 0;
-            if (status != 'A' && !motor_ready) motor_line[0] = 0;
-        }
-        motor_check(); osDelay(10);
-    }
-}
+
+          if (estop) {
+              motor_estop(&motorX, 1);
+              motor_estop(&motorY, 1);
+              motor_stop(&motorX);
+              motor_stop(&motorY);
+              mks_stop();
+
+              while (estop)
+                  osDelay(10);
+
+              continue;
+          }
+
+          if (motor_ready) {
+              snprintf(command, sizeof(command), "%s", motor_line);
+
+              motor_ready = 0;
+              motor_busy = 1;
+
+              motor_command(command);
+
+              motor_busy = 0;
+
+              if (status != 'A' && !motor_ready)
+                  motor_line[0] = 0;
+          }
+
+          motor_check();
+          osDelay(10);
+      }
+  }
+

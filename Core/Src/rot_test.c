@@ -34,7 +34,7 @@ extern UART_HandleTypeDef huart5;
 /* 원점. 0x34 로 모터1 센서를 본다 */
 #define HM_TRIG       0     /* Low 감지 */
 #define HM_DIR        0     /* 0=CW, 1=CCW */
-#define HM_RPM        100
+#define HM_RPM        200
 #define HM_LIMIT      0    /* 홈 후 축 잠금 유지 */
 
 /* 6.1 / 6.9 */

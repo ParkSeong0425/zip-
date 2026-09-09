@@ -201,10 +201,6 @@ static void Check(int event)
 	char message[48];
 	int full = full_get();
 
-	if (estop) {
-		status = 'A';
-		alarm = 9;
-	}
 
 	if (event) {
 		snprintf(message, sizeof(message), "44A_%02d", alarm);

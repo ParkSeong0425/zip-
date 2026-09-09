@@ -54,14 +54,14 @@ osThreadId_t MOTOR_TaskHandle;
 const osThreadAttr_t MOTOR_Task_attributes = {
   .name = "MOTOR_Task",
   .stack_size = 1024 * 4,
-  .priority = (osPriority_t) osPriorityNormal,
+  .priority = (osPriority_t) osPriorityAboveNormal,
 };
 /* Definitions for NET_Task */
 osThreadId_t NET_TaskHandle;
 const osThreadAttr_t NET_Task_attributes = {
   .name = "NET_Task",
   .stack_size = 1024 * 4,
-  .priority = (osPriority_t) osPriorityAboveNormal,
+  .priority = (osPriority_t) osPriorityNormal,
 };
 /* Definitions for RFID */
 osThreadId_t RFIDHandle;
